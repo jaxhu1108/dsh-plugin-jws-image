@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-jws-image",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "JWS image generation for DeepSeek Harness: a jws_generate_image tool plus a composer-dock generation window, over the native image.aijws.com API.",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib/index.js", "lib/client.js", "lib/probe.js", "lib/credentials.js", "lib/jws-api.js", "lib/contract.js", "contract/snapshot.json", "cordis.patch.yml", "README.md"],
+  "files": ["lib", "contract/snapshot.json", "cordis.patch.yml", "README.md"],
   "engines": { "node": ">=22" },
   "scripts": { "test": "node --test" },
   "dsh": {

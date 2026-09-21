@@ -65,6 +65,13 @@ function withStubbedFetch(run) {
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), init })
     if (String(url).endsWith('/openapi.json')) return { ok: true, status: 200, json: async () => LIVE_SPEC }
+    if (String(url).includes('/v1/catalog/models')) {
+      return jsonResponse([{
+        id: 'image:catalog-pick',
+        modes: ['text-to-image', 'image-to-image'],
+        skus: [{ mode: 'text-to-image', size: '3:4', resolution: '2K', quality: 'high', unit: 'image', price: 1, currency: 'USD' }],
+      }])
+    }
     if (String(url).endsWith('/v1/quotes')) {
       return jsonResponse({ quoteId: 'q1', amount: 2, currency: 'CNY', expiresAt: new Date(Date.now() + 60_000).toISOString() })
     }
