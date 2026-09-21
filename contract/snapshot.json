@@ -1,0 +1,185 @@
+{
+  "infoVersion": "1.0.0",
+  "docSha256": "c4bf936ad974b95bc2fb459aeb1e9d31818bf28e0d4639a2bb3aa7ea7940cfcb",
+  "endpoints": [
+    "DELETE /v1/inputs/{id}",
+    "GET /openai/v1/models",
+    "GET /openai/v1/models/{id}",
+    "GET /openai/v1/videos/{id}",
+    "GET /openai/v1/videos/{id}/content",
+    "GET /v1/catalog/models",
+    "GET /v1/catalog/models/{id}",
+    "GET /v1/inputs/{id}",
+    "GET /v1/models",
+    "GET /v1/models/{id}",
+    "GET /v1/tasks/{id}",
+    "GET /v1/tasks/{id}/content",
+    "GET /v1/videos/{id}",
+    "GET /v1/videos/{id}/content",
+    "POST /openai/v1/images/edits",
+    "POST /openai/v1/images/generations",
+    "POST /openai/v1/videos",
+    "POST /openai/v1/videos/generations",
+    "POST /v1/image/generations",
+    "POST /v1/images/edits",
+    "POST /v1/images/generations",
+    "POST /v1/inputs",
+    "POST /v1/quotes",
+    "POST /v1/video/generations",
+    "POST /v1/videos",
+    "POST /v1/videos/generations",
+    "PUT /v1/inputs/{id}/items/{itemId}"
+  ],
+  "requiredFields": {
+    "POST /v1/images/generations": [
+      "model",
+      "prompt"
+    ],
+    "POST /v1/videos": [
+      "model",
+      "prompt"
+    ],
+    "POST /v1/videos/generations": [
+      "model",
+      "prompt"
+    ],
+    "POST /openai/v1/images/generations": [
+      "model",
+      "prompt"
+    ],
+    "POST /openai/v1/videos": [
+      "model",
+      "prompt"
+    ],
+    "POST /openai/v1/videos/generations": [
+      "model",
+      "prompt"
+    ],
+    "POST /v1/inputs": [
+      "items",
+      "purpose"
+    ],
+    "POST /v1/image/generations": [
+      "count",
+      "maxAmount",
+      "mode",
+      "model",
+      "prompt",
+      "quality",
+      "resolution",
+      "size"
+    ],
+    "POST /v1/video/generations": [
+      "aspectRatio",
+      "duration",
+      "maxAmount",
+      "mode",
+      "model",
+      "prompt",
+      "resolution"
+    ]
+  },
+  "responseFields": {
+    "GET /v1/models": [
+      "data",
+      "object"
+    ],
+    "GET /v1/models/{id}": [
+      "created",
+      "id",
+      "object",
+      "owned_by"
+    ],
+    "POST /v1/images/generations": [
+      "created",
+      "data",
+      "usage"
+    ],
+    "POST /v1/images/edits": [
+      "created",
+      "data",
+      "usage"
+    ],
+    "POST /v1/videos": [
+      "completed_at",
+      "created_at",
+      "error",
+      "id",
+      "model",
+      "object",
+      "progress",
+      "seconds",
+      "size",
+      "status"
+    ],
+    "POST /v1/videos/generations": [
+      "error",
+      "id",
+      "model",
+      "request_id",
+      "status",
+      "video"
+    ],
+    "GET /openai/v1/models": [
+      "data",
+      "object"
+    ],
+    "GET /openai/v1/models/{id}": [
+      "created",
+      "id",
+      "object",
+      "owned_by"
+    ],
+    "POST /openai/v1/images/generations": [
+      "created",
+      "data",
+      "usage"
+    ],
+    "POST /openai/v1/images/edits": [
+      "created",
+      "data",
+      "usage"
+    ],
+    "POST /openai/v1/videos": [
+      "completed_at",
+      "created_at",
+      "error",
+      "id",
+      "model",
+      "object",
+      "progress",
+      "seconds",
+      "size",
+      "status"
+    ],
+    "POST /openai/v1/videos/generations": [
+      "error",
+      "id",
+      "model",
+      "request_id",
+      "status",
+      "video"
+    ],
+    "GET /v1/catalog/models": [
+      "data"
+    ],
+    "GET /v1/catalog/models/{id}": [
+      "data"
+    ],
+    "POST /v1/quotes": [
+      "data"
+    ],
+    "GET /v1/inputs/{id}": [
+      "data"
+    ],
+    "DELETE /v1/inputs/{id}": [
+      "data"
+    ],
+    "PUT /v1/inputs/{id}/items/{itemId}": [
+      "data"
+    ],
+    "GET /v1/tasks/{id}": [
+      "data"
+    ]
+  }
+}
