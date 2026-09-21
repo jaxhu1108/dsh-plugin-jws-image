@@ -6,15 +6,39 @@ DSH 的 JWS 生图插件：agent 工具 `jws_generate_image` + 输入框下方�
 - 密钥：`JWS_API_KEY` 环境变量，或 `~/.config/jws-image/config.json`（**与 `jws-api-demo` skill 共用同一份**）
 - 密钥**只在宿主进程**；浏览器不接触、不存储、不记录
 
+## 模型与参数从哪来
+
+不写死任何模型 id 或尺寸。每次调用按这个顺序定模型：
+
+1. 调用参数 `model`
+2. 配置的 `defaultModel`
+3. 实时目录里第一个支持 `text-to-image` 的模型
+
+`size / resolution / quality` 取自该模型 `skus[]` 里 `mode` **匹配本次调用**的那条记录
+（接口要求这几个字段必须同出一条 SKU，否则会被拒）。目录读不到时退回最后一手默认值，
+让接口做裁判；但如果连模型都没指定，目录读不到就是明确报错。
+
+## 预算与币种
+
+预算是用户按 **元** 写的（默认 20），而接口报价币种是 **USD**。两者**不做汇率换算**
+——离线凭空造一个汇率会悄悄改变熔断线。金额按原样比较，币种不一致时在结果里
+明说，并提示把 `maxAmount` 换成报价币种的数值。
+
 ## 开发
 
 ```powershell
 node --test                        # 跑测试（不要写 `node --test test/`，本机 Node 会把目录参数当模块路径）
 npm pack                           # 打包
-dsh plugin --profile web add .\dsh-plugin-jws-image-0.1.1.tgz
+dsh plugin --profile web add .\dsh-plugin-jws-image-0.1.2.tgz
 # 首次安装必须重启网关（bundle 列表在启动时读取）
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Administrator\.dsh\restart-web-gateway.ps1"
 ```
+
+`package.json` 的 `files` 用 **`"lib"` 整个目录**，不逐个列文件：
+0.1.0–0.1.2 曾经逐个列，结果后加的 `lib/generate.js` 没进包，
+而 `lib/index.js` 却 import 它 —— 开发机因为手工拷过文件所以看不出，
+干净安装会在启动时崩。`test/package.test.mjs` 现在会对着真实 packlist
+断言"每个相对 import 都被发布"，改动 `files` 后跑一遍就知道。
 
 装好后：
 
@@ -53,4 +77,6 @@ node --test test/jws-api.test.mjs                    # 单个文件
 
 - 第一版只做**图片**（架构已为视频留口子，`/v1/videos*` 未接）
 - 图片送进对话受**当前路由模型是否支持图片输入**门禁（Phase 4 处理）
-- 生成窗口、密钥设置界面、路由属后续计划（Phase 2+）
+- 生成窗口、密钥设置界面属 Phase 2（当前 dock 入口只做开合占位）
+- 密钥的 `JWS_IMAGE_CONFIG_DIR` 环境变量可覆盖配置目录（与 skill 脚本的 `configDir` 选项对应），
+  主要用于测试时避开操作者真实密钥

@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -94,12 +94,42 @@ function registerTool(ctx) {
   return definition
 }
 
+/**
+ * Point every credential lookup at a throwaway directory for one test.
+ *
+ * Both the home-derived default and the env override are redirected, because
+ * the default reads the operator's real `~/.config/jws-image` once a key has
+ * been configured â€?without this a "no key" test would start failing, and a
+ * "happy path" test could bill the operator's account.
+ *
+ * @param dir - the throwaway home directory for this test.
+ * @returns the previous values, to be restored in a `finally` block.
+ */
+function pinCredentialEnv(dir) {
+  const previous = {
+    DSH_HOME: process.env.DSH_HOME,
+    JWS_API_KEY: process.env.JWS_API_KEY,
+    JWS_IMAGE_CONFIG_DIR: process.env.JWS_IMAGE_CONFIG_DIR,
+  }
+  process.env.DSH_HOME = dir
+  // Mirror the production default exactly (`~/.config/jws-image`) under the
+  // throwaway home, so a test can write into `<home>/.config/jws-image` and be
+  // exercising the same shape the sibling skill uses.
+  process.env.JWS_IMAGE_CONFIG_DIR = join(dir, '.config', 'jws-image')
+  return {
+    restore() {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    },
+  }
+}
+
 test('a missing attachments service degrades to paths only', async () => {
   const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
-  const previousHome = process.env.DSH_HOME
-  const previousKey = process.env.JWS_API_KEY
+  const env = pinCredentialEnv(home)
   try {
-    process.env.DSH_HOME = home
     process.env.JWS_API_KEY = 'jws_live_test'
     const definition = registerTool({ get: () => undefined })
 
@@ -126,21 +156,16 @@ test('a missing attachments service degrades to paths only', async () => {
     const written = await readFile(value.images[0].path)
     assert.equal(written.length, 8)
   } finally {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-    if (previousKey === undefined) delete process.env.JWS_API_KEY
-    else process.env.JWS_API_KEY = previousKey
+    env.restore()
     await rm(home, { recursive: true, force: true })
   }
 })
 
 test('an attachments service that accepts the image yields one image block', async () => {
   const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
-  const previousHome = process.env.DSH_HOME
-  const previousKey = process.env.JWS_API_KEY
+  const env = pinCredentialEnv(home)
   const saved = []
   try {
-    process.env.DSH_HOME = home
     process.env.JWS_API_KEY = 'jws_live_test'
     const definition = registerTool({
       get: (service) => (service === 'attachments'
@@ -165,20 +190,15 @@ test('an attachments service that accepts the image yields one image block', asy
     assert.equal(blocks[1].type, 'image')
     assert.equal(blocks[1].attachment.attachmentId, 'att-1')
   } finally {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-    if (previousKey === undefined) delete process.env.JWS_API_KEY
-    else process.env.JWS_API_KEY = previousKey
+    env.restore()
     await rm(home, { recursive: true, force: true })
   }
 })
 
 test('without a key the tool returns no-key and makes no request', async () => {
   const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
-  const previousHome = process.env.DSH_HOME
-  const previousKey = process.env.JWS_API_KEY
+  const env = pinCredentialEnv(home)
   try {
-    process.env.DSH_HOME = home
     delete process.env.JWS_API_KEY
     const definition = registerTool({ get: () => undefined })
     const requests = []
@@ -191,10 +211,47 @@ test('without a key the tool returns no-key and makes no request', async () => {
     assert.deepEqual(requests, [])
     assert.deepEqual(value.images, [])
   } finally {
-    if (previousHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = previousHome
-    if (previousKey === undefined) delete process.env.JWS_API_KEY
-    else process.env.JWS_API_KEY = previousKey
+    env.restore()
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a key written by the sibling skill is picked up', async () => {
+  // Spec Â§9/D3: one key serves both the plugin and the `jws-api-demo` skill, so
+  // the plugin must read exactly the file that skill's `setup` writes. This is
+  // the regression guard for defaulting to `$DSH_HOME` instead of the home
+  // directory â€?with the two differing, the shared-key promise silently breaks.
+  const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
+  const env = pinCredentialEnv(home)
+  try {
+    delete process.env.JWS_API_KEY
+    const configDir = join(home, '.config', 'jws-image')
+    await mkdir(configDir, { recursive: true })
+    await writeFile(join(configDir, 'config.json'), JSON.stringify({ apiKey: 'jws_live_from_skill' }))
+
+    const definition = registerTool({ get: () => undefined })
+    const value = await withStubbedFetch(async () => definition.execute({ prompt: 'a cat' }, {}))
+    assert.equal(value.status, 'ok')
+  } finally {
+    env.restore()
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('a malformed config file degrades to no-key instead of throwing', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
+  const env = pinCredentialEnv(home)
+  try {
+    delete process.env.JWS_API_KEY
+    const configDir = join(home, '.config', 'jws-image')
+    await mkdir(configDir, { recursive: true })
+    await writeFile(join(configDir, 'config.json'), '{ not json')
+
+    const definition = registerTool({ get: () => undefined })
+    const value = await withStubbedFetch(async () => definition.execute({ prompt: 'a cat' }, {}))
+    assert.equal(value.status, 'no-key')
+  } finally {
+    env.restore()
     await rm(home, { recursive: true, force: true })
   }
 })
