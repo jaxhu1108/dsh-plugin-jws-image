@@ -1,0 +1,17 @@
+# dsh-plugin-jws-image bundle patch.
+#
+# One row mounts BOTH halves: the host half (this row) and the browser half,
+# which dsh-client-modules discovers from `dsh.client` in package.json.
+# The API key is never written here; it is read at call time by the host from
+# JWS_API_KEY or ~/.config/jws-image/config.json.
+
+- insert:
+    - id: tool-jws-image
+      name: 'dsh-plugin-jws-image'
+      config:
+        baseURL: 'https://image.aijws.com'
+        defaultModel: ''
+        maxAmount: 20
+        outputDir: ''
+        credentialsFile: ''
+        apiCheckTtlMs: 86400000
