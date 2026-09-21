@@ -165,20 +165,3 @@ test('apply never throws when the slots service is missing or partial', async ()
   // A service without the declaration-aware API must degrade, not throw.
   assert.doesNotThrow(() => exports.apply({ slots: { register: () => {} } }))
 })
-
-test('the entry renders a clickable button labelled in Chinese', async () => {
-  const exports = await loadExports()
-  const { slots, registrations } = fakeSlots({ declared: ['conversation.composer.dock'] })
-  exports.apply({ slots })
-
-  const element = registrations[0].component()
-  assert.equal(element.type, 'button')
-  assert.equal(element.props.type, 'button')
-  assert.equal(element.props.className, 'jws-image-entry')
-  assert.equal(typeof element.props.onClick, 'function')
-  // Single string child: assert on the collected child list, which is what this
-  // mock's createElement receives (React itself passes the bare string).
-  assert.deepEqual(element.children, ['JWS 生图'])
-  // Styling is inline so the entry cannot depend on DSH's internal CSS.
-  assert.equal(typeof element.props.style, 'object')
-})

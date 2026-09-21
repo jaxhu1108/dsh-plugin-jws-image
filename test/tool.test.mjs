@@ -94,12 +94,35 @@ function registerTool(ctx) {
   return definition
 }
 
+test('apply waits for Connection instead of requiring it', () => {
+  // `connection` must NOT be in the plugin's own inject list: that would keep
+  // the agent tool from loading in a headless deployment with no web stack.
+  // The routes mount through ctx.inject, which waits without gating activation.
+  let definition
+  const injected = []
+  const routes = []
+  apply({
+    tools: { register: (value) => { definition = value } },
+    get: () => undefined,
+    logger: undefined,
+    inject: (services, callback) => {
+      injected.push(services)
+      callback({ connection: { fetch: { register: (route) => routes.push(route) } } })
+    },
+  }, {})
+
+  assert.equal(typeof definition?.name, 'string')
+  assert.deepEqual(injected, [['connection']])
+  assert.equal(routes.length, 9)
+  assert.equal(routes[0].path.startsWith('/api/jws-image/'), true)
+})
+
 /**
  * Point every credential lookup at a throwaway directory for one test.
  *
  * Both the home-derived default and the env override are redirected, because
  * the default reads the operator's real `~/.config/jws-image` once a key has
- * been configured â€?without this a "no key" test would start failing, and a
+ * been configured â€” without this a "no key" test would start failing, and a
  * "happy path" test could bill the operator's account.
  *
  * @param dir - the throwaway home directory for this test.
@@ -220,7 +243,7 @@ test('a key written by the sibling skill is picked up', async () => {
   // Spec Â§9/D3: one key serves both the plugin and the `jws-api-demo` skill, so
   // the plugin must read exactly the file that skill's `setup` writes. This is
   // the regression guard for defaulting to `$DSH_HOME` instead of the home
-  // directory â€?with the two differing, the shared-key promise silently breaks.
+  // directory â€” with the two differing, the shared-key promise silently breaks.
   const home = await mkdtemp(join(tmpdir(), 'jws-tool-'))
   const env = pinCredentialEnv(home)
   try {
