@@ -11,7 +11,7 @@ DSH 的 JWS 生图插件：agent 工具 `jws_generate_image` + 输入框下方�
 ```powershell
 node --test                        # 跑测试（不要写 `node --test test/`，本机 Node 会把目录参数当模块路径）
 npm pack                           # 打包
-dsh plugin --profile web add .\dsh-plugin-jws-image-0.1.0.tgz
+dsh plugin --profile web add .\dsh-plugin-jws-image-0.1.1.tgz
 # 首次安装必须重启网关（bundle 列表在启动时读取）
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Administrator\.dsh\restart-web-gateway.ps1"
 ```
