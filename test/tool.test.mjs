@@ -13,8 +13,28 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import snapshot from '../contract/snapshot.json' with { type: 'json' }
 import { apply, renderResult } from '../lib/index.js'
+
+/**
+ * A live OpenAPI document that summarizes to exactly the pinned snapshot, so
+ * the contract check reports `up-to-date` without any network access.
+ */
+const LIVE_SPEC = {
+  info: { version: '1.0.0' },
+  paths: {
+    '/v1/quotes': {
+      post: {
+        requestBody: { content: { 'application/json': { schema: { required: ['type', 'model'] } } } },
+        responses: { 200: { content: { 'application/json': { schema: { properties: { data: {} } } } } } },
+      },
+    },
+    '/v1/tasks/{id}': {
+      get: {
+        responses: { 200: { content: { 'application/json': { schema: { properties: { data: {} } } } } } },
+      },
+    },
+  },
+}
 
 /** A JSON envelope response. */
 function jsonResponse(data) {
@@ -44,7 +64,7 @@ function withStubbedFetch(run) {
   const requests = []
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), init })
-    if (String(url).endsWith('/openapi.json')) return { ok: true, status: 200, json: async () => ({ ...snapshot }) }
+    if (String(url).endsWith('/openapi.json')) return { ok: true, status: 200, json: async () => LIVE_SPEC }
     if (String(url).endsWith('/v1/quotes')) {
       return jsonResponse({ quoteId: 'q1', amount: 2, currency: 'CNY', expiresAt: new Date(Date.now() + 60_000).toISOString() })
     }
@@ -90,6 +110,11 @@ test('a missing attachments service degrades to paths only', async () => {
     const blocks = renderResult({}, value)
     assert.equal(blocks.length, 1)
     assert.equal(blocks[0].type, 'text')
+    // Task 11: every result text carries the contract line, and it is last.
+    // The line itself is either the calm form or the warning form; both are
+    // valid here, because this stub's spec is not the pinned snapshot.
+    assert.match(value.apiLine, /^(API: |⚠️ JWS API )/u)
+    assert.equal(blocks[0].text.split('\n').at(-1), value.apiLine)
     // The image really landed on disk, through the `.tmp` + rename path.
     const written = await readFile(value.images[0].path)
     assert.equal(written.length, 8)
