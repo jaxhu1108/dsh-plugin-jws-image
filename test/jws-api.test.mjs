@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 
 import { createJwsClient } from '../lib/jws-api.js'
 
-/** Build a fetch stub that records calls and answers from a table. */
+/**
+ * Build a fetch stub that records calls and answers from a table.
+ *
+ * Only JSON string bodies are parsed; a binary PUT body is recorded verbatim,
+ * so the same stub serves both the JSON and the upload tests.
+ */
 function stubFetch(handler) {
   const calls = []
   const fetchImpl = async (url, init) => {
-    calls.push({ url, init, body: init?.body === undefined ? undefined : JSON.parse(init.body) })
+    const raw = init?.body
+    const body = typeof raw === 'string' ? JSON.parse(raw) : raw
+    calls.push({ url, init, body })
     return handler(calls.length, calls.at(-1))
   }
   return { calls, fetchImpl }
@@ -55,4 +63,31 @@ test('requests never follow redirects', async () => {
   const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
   await client.catalog()
   assert.equal(calls[0].init.redirect, 'error')
+})
+
+test('uploadReferences declares, uploads, and reuses one Idempotency-Key', async () => {
+  const { calls, fetchImpl } = stubFetch((n) => {
+    if (n === 1) return ok({ id: 'sess1', items: [{ itemId: 'item1' }] })
+    return ok({})
+  })
+  const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
+  const bytes = new Uint8Array([1, 2, 3])
+  const result = await client.uploadReferences({ files: [{ bytes, mimeType: 'image/png' }], requestId: 'req-1' })
+
+  assert.deepEqual(result, { inputSessionId: 'sess1', imageInputIds: ['item1'] })
+  assert.equal(calls[0].url, 'https://api.test/v1/inputs')
+  assert.equal(calls[0].init.headers['Idempotency-Key'], 'req-1')
+  assert.deepEqual(calls[0].body, {
+    purpose: 'image-generation',
+    items: [{
+      sourceId: 'reference-1',
+      mimeType: 'image/png',
+      size: 3,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    }],
+  })
+  assert.equal(calls[1].url, 'https://api.test/v1/inputs/sess1/items/item1')
+  assert.equal(calls[1].init.method, 'PUT')
+  assert.equal(calls[1].init.headers['Content-Type'], 'image/png')
+  assert.deepEqual(calls[1].init.body, bytes)
 })
