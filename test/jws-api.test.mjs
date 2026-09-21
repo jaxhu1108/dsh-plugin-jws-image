@@ -91,3 +91,45 @@ test('uploadReferences declares, uploads, and reuses one Idempotency-Key', async
   assert.equal(calls[1].init.headers['Content-Type'], 'image/png')
   assert.deepEqual(calls[1].init.body, bytes)
 })
+
+test('createGeneration posts with the shared Idempotency-Key', async () => {
+  const { calls, fetchImpl } = stubFetch(() => ok({ id: 'task1' }))
+  const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
+  const taskId = await client.createGeneration({ requestId: 'req-1', body: { model: 'image:x' } })
+  assert.equal(taskId, 'task1')
+  assert.equal(calls[0].url, 'https://api.test/v1/image/generations')
+  assert.equal(calls[0].init.headers['Idempotency-Key'], 'req-1')
+})
+
+test('waitForSettlement keeps polling while settling, then returns', async () => {
+  let n = 0
+  const { fetchImpl } = stubFetch(() => {
+    n += 1
+    if (n === 1) return ok({ id: 't', status: 'succeeded', settlementStatus: 'settling', outputCount: 1 })
+    return ok({ id: 't', status: 'succeeded', settlementStatus: 'settled', outputCount: 1 })
+  })
+  const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
+  const task = await client.waitForSettlement('t', { intervalMs: 1, timeoutMs: 2000 })
+  assert.equal(task.settlementStatus, 'settled')
+  assert.equal(n, 2)
+})
+
+test('waitForSettlement throws on a terminal failure', async () => {
+  const { fetchImpl } = stubFetch(() => ok({ id: 't', status: 'failed', settlementStatus: 'failed', outputCount: 0 }))
+  const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
+  await assert.rejects(() => client.waitForSettlement('t', { intervalMs: 1, timeoutMs: 2000 }), /failed/u)
+})
+
+test('downloadContent reads bytes and media type', async () => {
+  const bytes = new Uint8Array([9, 9])
+  const { fetchImpl } = stubFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'image/png' },
+    arrayBuffer: async () => bytes.buffer,
+  }))
+  const client = createJwsClient({ baseURL: 'https://api.test', apiKey: 'jws_live_k', fetchImpl })
+  const result = await client.downloadContent('t', 0)
+  assert.equal(result.mediaType, 'image/png')
+  assert.equal(result.bytes.length, 2)
+})
