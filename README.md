@@ -1,19 +1,44 @@
 # dsh-plugin-jws-image
 
-DSH 的 JWS 生图插件：agent 工具 `jws_generate_image` + 输入框下方的生图窗口。
+DSH 的 JWS 生图插件：agent 工具 `jws_generate_image` + **右侧栏里的生图界面**。
 
 - 接口：`https://image.aijws.com/v1`（**原生面**：目录 → 报价 → 上传 → 任务 → 下载）
 - 密钥：`JWS_API_KEY` 环境变量，或 `~/.config/jws-image/config.json`（**与 `jws-api-demo` skill 共用同一份**）
 - 密钥**只在宿主进程**；浏览器不接触、不存储、不记录
+
+## 界面放在哪：右侧栏 tab
+
+生图界面**开在右侧栏**（和文件树、预览、指南同一列），不是弹窗。
+
+注册是**两段式**，少一段就会开出一个空 tab：
+
+1. `ctx.sidebarRightTabs.register({ id, kind, priority, title, guide })` —— 这个 tab **是什么**。
+   `id` 必须自己带：**`kind` 不唯一**（extension 可以顶掉 builtin 的同 kind）。
+2. 正文与标题分别注册进 **带 key 的** `sidebar.right.pane.tab` /
+   `sidebar.right.pane.tab.title`，key 用那个 **`id`**，不是 `kind`
+   —— 这是最容易错的一步，测试专门钉住它。
+3. `ctx.sidebarRight.openTab(kind)` 打开。
+
+`priority: 'extension'`（产品外的类型，优先级高于自带 viewer），并在指南页放了一个入口。
+
+这三个服务**走 `ctx.inject([...])` 等**，不放进插件自己的 `inject` 列表：
+放进去的话，没有右侧栏的部署会连 dock 入口和浏览器半边都不加载。
+dock 入口**先试右侧栏，失败才回落弹窗**，两种构建都能用。
+
+> 两个由"不再走弹窗"引出的坑，都已修：
+> 入口原来靠弹窗那次 state 请求才知道有没有密钥，改成挂载时就查，
+> 否则「未配置密钥 · 点此设置」再也不会出现；
+> 样式表原来在点击时才注入，而 tab 可能由侧栏自己打开（指南页、恢复的布局），
+> 现在面板挂载时自己注入。
 
 ## 两条入口，同一套宿主代码
 
 | 入口 | 走什么 |
 |---|---|
 | agent 工具 `jws_generate_image` | 宿主直接调 API |
-| 输入框下方 dock 入口 → 生图窗口 | 浏览器调 `/api/jws-image/*`，宿主代调 API |
+| 输入框下方 dock 入口 → **右侧栏生图 tab** | 浏览器调 `/api/jws-image/*`，宿主代调 API |
 
-窗口**首次打开**若没有密钥，直接显示密钥设置页（粘贴 → 宿主先校验再写盘 0600），
+界面**首次打开**若没有密钥，直接显示密钥设置页（粘贴 → 宿主先校验再写盘 0600），
 不需要用户去终端跑 skill 的 `setup`。已配密钥时显示生图表单。
 
 表单里的**模型 / 尺寸 / 分辨率 / 质量全部来自实时 `catalog`**，没有一个写死的枚举；
