@@ -13,7 +13,38 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { apply, renderResult } from '../lib/index.js'
+import { apply, readHistory, renderResult, writeHistory } from '../lib/index.js'
+
+test('the history round-trips through disk and survives a corrupt file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'jws-hist-'))
+  try {
+    const file = join(dir, 'history.json')
+    // Missing file: an empty history, not an error.
+    assert.deepEqual(await readHistory(file), [])
+
+    const entries = [{ taskId: 't1', files: ['/tmp/out/a.png'], amount: 0.05, currency: 'USD' }]
+    await writeHistory(file, entries)
+    assert.deepEqual(await readHistory(file), entries)
+
+    await writeFile(file, '{ not json')
+    assert.deepEqual(await readHistory(file), [])
+    await writeFile(file, JSON.stringify({ entries: 'not a list' }))
+    assert.deepEqual(await readHistory(file), [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a history write that cannot land is swallowed, not thrown', async () => {
+  // Writing onto a directory path fails; the caller is mid-generation and must
+  // not be turned into a failure by a bookkeeping problem.
+  const dir = await mkdtemp(join(tmpdir(), 'jws-hist-'))
+  try {
+    await assert.doesNotReject(() => writeHistory(dir, []))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
 
 /**
  * A live OpenAPI document that summarizes to exactly the pinned snapshot, so
@@ -113,7 +144,7 @@ test('apply waits for Connection instead of requiring it', () => {
 
   assert.equal(typeof definition?.name, 'string')
   assert.deepEqual(injected, [['connection']])
-  assert.equal(routes.length, 9)
+  assert.equal(routes.length, 10)
   assert.equal(routes[0].path.startsWith('/api/jws-image/'), true)
 })
 

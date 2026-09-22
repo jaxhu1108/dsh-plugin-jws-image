@@ -19,7 +19,8 @@ import test from 'node:test'
  * own hook order. `render` also expands function components, so a test can see
  * the markup a nested component produces rather than just its element stub.
  */
-function createHarness() {
+function createHarness(options = {}) {
+  const { runEffects = false } = options
   const store = new Map()
   let currentCells = null
   let cursor = 0
@@ -35,7 +36,9 @@ function createHarness() {
   const react = {
     Fragment: Symbol('Fragment'),
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: flatten(children) }),
-    useEffect: () => {},
+    // Off by default: the generation form starts an interval while busy, and a
+    // harness that never cleans up would leak it into the test process.
+    useEffect: runEffects ? (fn) => { fn() } : () => {},
     useState: (initial) => {
       const index = cursor
       cursor += 1
@@ -461,6 +464,155 @@ test('an empty history renders nothing rather than an empty box', async () => {
   assert.equal(harness.render(exports.HistoryList, { entries: [], onRerun: () => {} }), null)
   assert.equal(harness.render(exports.HistoryList, { entries: undefined, onRerun: () => {} }), null)
 })
+
+// #region image preview
+
+test('historyImageUrl carries only a task id and an index', async () => {
+  const { exports } = await loadExports()
+  // The browser never names a path; the host resolves the file from its own
+  // record, which is what makes a traversal bug impossible rather than patched.
+  const url = exports.historyImageUrl('image:abc/../x', 2)
+  assert.equal(url, '/api/jws-image/history-image?taskId=image%3Aabc%2F..%2Fx&index=2')
+  assert.equal(url.includes('/tmp/'), false)
+})
+
+test('baseName handles both separators and an empty path', async () => {
+  const { exports } = await loadExports()
+  assert.equal(exports.baseName('C:\\Users\\me\\image-1.png'), 'image-1.png')
+  assert.equal(exports.baseName('/tmp/out/image-2.jpg'), 'image-2.jpg')
+  assert.equal(exports.baseName(''), '')
+  assert.equal(exports.baseName(undefined), '')
+})
+
+test('every recorded file gets a lazy thumbnail', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: [{
+      taskId: 't1',
+      model: 'image:x',
+      prompt: '一只猫',
+      amount: 0.05,
+      currency: 'USD',
+      files: ['/tmp/out/image-1.png', '/tmp/out/image-2.png'],
+    }],
+    onRerun: () => {},
+    onPreview: () => {},
+  }))
+  const thumbs = tree.filter((node) => node.props?.className === 'jws-thumb')
+  assert.equal(thumbs.length, 2)
+  assert.equal(thumbs[0].props.src, '/api/jws-image/history-image?taskId=t1&index=0')
+  assert.equal(thumbs[1].props.src, '/api/jws-image/history-image?taskId=t1&index=1')
+  // Twenty full-size PNGs would be tens of megabytes; only load what is looked at.
+  assert.equal(thumbs[0].props.loading, 'lazy')
+  assert.equal(thumbs[0].props.alt, 'image-1.png')
+})
+
+test('an entry with no recorded file renders no thumbnail', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: [{ taskId: 't1', files: [], prompt: 'x' }],
+    onRerun: () => {},
+    onPreview: () => {},
+  }))
+  assert.equal(tree.some((node) => node.props?.className === 'jws-thumb'), false)
+})
+
+test('clicking a thumbnail previews that exact image', async () => {
+  const { exports, harness } = await loadExports()
+  const seen = []
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: [{ taskId: 't1', model: 'image:x', prompt: '一只猫', amount: 0.05, currency: 'USD', files: ['/tmp/out/a.png', '/tmp/out/b.png'] }],
+    onRerun: () => {},
+    onPreview: (value) => seen.push(value),
+  }))
+  tree.filter((node) => node.props?.className === 'jws-thumb')[1].props.onClick()
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].src, '/api/jws-image/history-image?taskId=t1&index=1')
+  assert.equal(seen[0].title, 'b.png')
+  assert.match(seen[0].caption, /0\.05 USD/u)
+  assert.match(seen[0].caption, /b\.png/u)
+})
+
+test('clicking a fresh result previews the image it just generated', async () => {
+  const { exports, harness } = await loadExports()
+  const seen = []
+  const props = { models: [MODEL], maxAmount: 20, budgetCurrency: 'CNY', onPreview: (value) => seen.push(value) }
+  await withFetch(
+    {
+      '/generate': {
+        body: {
+          ok: true,
+          taskId: 't9',
+          files: ['/tmp/out/image-1.png'],
+          images: [{ path: '/tmp/out/image-1.png', mediaType: 'image/png', bytes: 3, data: 'AAEC' }],
+          amount: 0.5,
+          currency: 'USD',
+          model: 'image:dual',
+        },
+      },
+    },
+    async () => {
+      let tree = walk(harness.render(exports.GenerateForm, props))
+      tree.find((node) => node.type === 'textarea').props.onChange({ target: { value: 'a cat' } })
+      tree = walk(harness.render(exports.GenerateForm, props))
+      await tree.find((node) => node.type === 'button' && node.props['data-primary'] === 'true').props.onClick()
+
+      tree = walk(harness.render(exports.GenerateForm, props))
+      const image = tree.find((node) => node.type === 'img')
+      assert.equal(typeof image.props.onClick, 'function')
+      image.props.onClick()
+      assert.equal(seen.length, 1)
+      // The fresh image is already in hand, so no second round trip.
+      assert.equal(seen[0].src, 'data:image/png;base64,AAEC')
+      assert.equal(seen[0].title, 'image-1.png')
+      assert.match(seen[0].caption, /0\.5 USD/u)
+    },
+  )
+})
+
+test('the lightbox shows the image with its caption and closes on both gestures', async () => {
+  // Effects must run here: the Escape handler is installed by one.
+  const { exports, harness } = await loadExports(createHarness({ runEffects: true }))
+  const original = globalThis.document
+  const listeners = []
+  globalThis.document = {
+    addEventListener: (type, fn) => listeners.push({ type, fn }),
+    removeEventListener: () => {},
+    body: {},
+  }
+  try {
+    // Nothing to show: renders nothing at all.
+    assert.equal(harness.render(exports.Lightbox, { preview: null, onClose: () => {} }), null)
+
+    let closed = 0
+    const tree = walk(harness.render(exports.Lightbox, {
+      preview: { src: 'data:image/png;base64,AA', title: 'image-1.png', caption: '0.5 USD · image:dual' },
+      onClose: () => { closed += 1 },
+    }))
+    const overlay = tree.find((node) => node.props?.className === 'jws-lightbox')
+    assert.ok(overlay, 'the lightbox must render an overlay')
+    assert.equal(overlay.props.role, 'dialog')
+    const image = tree.find((node) => node.type === 'img')
+    assert.equal(image.props.src, 'data:image/png;base64,AA')
+    assert.match(tree.find((node) => node.props?.className === 'jws-lightbox-caption').children[0], /0\.5 USD/u)
+
+    // Escape closes it.
+    const keyHandler = listeners.find((entry) => entry.type === 'keydown')
+    assert.ok(keyHandler, 'the lightbox must listen for Escape')
+    keyHandler.fn({ key: 'Escape' })
+    assert.equal(closed, 1)
+    // Clicking the backdrop closes it, but clicking the image itself must not.
+    overlay.props.onClick()
+    assert.equal(closed, 2)
+    image.props.onClick({ stopPropagation: () => {} })
+    assert.equal(closed, 2, 'clicking the image must not close the lightbox')
+  } finally {
+    if (original === undefined) delete globalThis.document
+    else globalThis.document = original
+  }
+})
+
+// #endregion
 
 test('maxCount reads the model capability and defaults to 4', async () => {
   const { exports } = await loadExports()

@@ -79,6 +79,8 @@ function makeHandlers(overrides = {}) {
     readApiCache: overrides.readApiCache ?? (async () => undefined),
     writeApiCache: async (file, value) => { state.caches.push({ file, value }) },
     writeFileAtomic: async () => {},
+    ...(overrides.readImageFile === undefined ? {} : { readImageFile: overrides.readImageFile }),
+    ...(overrides.persistHistory === undefined ? {} : { persistHistory: overrides.persistHistory }),
     renderApiStatus: (result) => `API: ${result.status}`,
     summarizeSpec: () => ({ infoVersion: '1.1.0', docSha256: 'b', endpoints: ['GET /v1/x', 'GET /v1/y'], requiredFields: {}, responseFields: {} }),
     compareContract: () => ({ status: 'changed', local: '1.0.0', live: '1.1.0', changes: ['新增 GET /v1/y'] }),
@@ -200,6 +202,28 @@ test('generate surfaces an API failure without leaking the key', async () => {
   assert.equal((await bodyOf(response)).error.includes('jws_live_leak'), false)
 })
 
+test('a finished generation is handed to the history store', async () => {
+  const persisted = []
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    persistHistory: async (entries) => { persisted.push(entries.map((entry) => entry.taskId)) },
+  })
+  await handlers.generate(postRequest({ prompt: 'a cat' }))
+  // Without this the history dies with the process, and its thumbnails would
+  // stop resolving after every restart.
+  assert.deepEqual(persisted, [['task-9']])
+})
+
+test('a failing history write does not fail a generation that already happened', async () => {
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    persistHistory: async () => { throw new Error('disk full') },
+  })
+  const response = await handlers.generate(postRequest({ prompt: 'a cat' }))
+  assert.equal(response.status, 200)
+  assert.equal((await bodyOf(response)).ok, true)
+})
+
 test('task needs an id and proxies the poll', async () => {
   const { handlers } = makeHandlers({ key: 'jws_live_x' })
   assert.equal((await handlers.task(getRequest(`${ROUTE_PREFIX}/task`))).status, 400)
@@ -224,6 +248,66 @@ test('api-update re-pins the snapshot and reports the diff', async () => {
   assert.equal(state.snapshots[0].file, '/tmp/snapshot.json')
   // The refreshed summary also invalidates the TTL cache.
   assert.equal(state.caches.length, 1)
+})
+
+test('history-image serves the bytes of a recorded task', async () => {
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    readImageFile: async () => new Uint8Array([137, 80, 78, 71]),
+  })
+  state.generated.push({ taskId: 't1', files: ['/tmp/out/image-1.png'], amount: 1, currency: 'USD' })
+  const response = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=0`))
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'image/png')
+  // The id does not survive a restart, so a cached body would outlive it.
+  assert.equal(response.headers.get('cache-control'), 'no-store')
+  assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [137, 80, 78, 71])
+})
+
+test('history-image picks the right content type per extension', async () => {
+  const { handlers, state } = makeHandlers({ readImageFile: async () => new Uint8Array([1]) })
+  state.generated.push({ taskId: 't1', files: ['/tmp/out/a.jpg', '/tmp/out/b.webp'] })
+  const jpg = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=0`))
+  const webp = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=1`))
+  assert.equal(jpg.headers.get('content-type'), 'image/jpeg')
+  assert.equal(webp.headers.get('content-type'), 'image/webp')
+})
+
+test('history-image refuses a task it never recorded', async () => {
+  const { handlers } = makeHandlers({ readImageFile: async () => new Uint8Array([1]) })
+  assert.equal((await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=nope`))).status, 404)
+  assert.equal((await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image`))).status, 400)
+})
+
+test('history-image rejects a malformed or out-of-range index', async () => {
+  const { handlers, state } = makeHandlers({ readImageFile: async () => new Uint8Array([1]) })
+  state.generated.push({ taskId: 't1', files: ['/tmp/out/a.png'] })
+  assert.equal((await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=-1`))).status, 400)
+  assert.equal((await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=x`))).status, 400)
+  assert.equal((await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=7`))).status, 404)
+})
+
+test('history-image never serves a file outside the output directory', async () => {
+  // The path comes from our own record, not the caller, but a corrupt record
+  // must not become an arbitrary-file read either.
+  let read = 0
+  const { handlers, state } = makeHandlers({
+    readImageFile: async () => { read += 1; return new Uint8Array([1]) },
+  })
+  state.generated.push({ taskId: 't1', files: ['/etc/passwd'] })
+  const response = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=0`))
+  assert.equal(response.status, 403)
+  assert.equal(read, 0, 'the file must not even be opened')
+})
+
+test('history-image reports an unreadable file instead of throwing', async () => {
+  const { handlers, state } = makeHandlers({
+    readImageFile: async () => { throw new Error('ENOENT') },
+  })
+  state.generated.push({ taskId: 't1', files: ['/tmp/out/gone.png'] })
+  const response = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=t1&index=0`))
+  assert.equal(response.status, 404)
+  assert.match((await bodyOf(response)).error, /读不到/u)
 })
 
 test('registerRoutes degrades to zero when Connection is absent', () => {
@@ -255,8 +339,8 @@ test('registerRoutes accepts an injected scope that carries connection directly'
     renderApiStatus: () => 'API: x',
     summarizeSpec: () => ({}),
     compareContract: () => ({ status: 'up-to-date', changes: [] }),
-  }), 9)
-  assert.equal(registered.length, 9)
+  }), 10)
+  assert.equal(registered.length, 10)
 })
 
 test('registerRoutes mounts every route under the shared prefix', () => {
@@ -284,8 +368,8 @@ test('registerRoutes mounts every route under the shared prefix', () => {
     summarizeSpec: () => ({}),
     compareContract: () => ({ status: 'up-to-date', changes: [] }),
   })
-  assert.equal(count, 9)
-  assert.equal(registered.length, 9)
+  assert.equal(count, 10)
+  assert.equal(registered.length, 10)
   for (const route of registered) {
     assert.equal(route.path.startsWith(`${ROUTE_PREFIX}/`), true, route.path)
     assert.equal(route.requestBody, 'buffered')
