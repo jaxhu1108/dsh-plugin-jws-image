@@ -144,7 +144,7 @@ test('apply waits for Connection instead of requiring it', () => {
 
   assert.equal(typeof definition?.name, 'string')
   assert.deepEqual(injected, [['connection']])
-  assert.equal(routes.length, 10)
+  assert.equal(routes.length, 11)
   assert.equal(routes[0].path.startsWith('/api/jws-image/'), true)
 })
 

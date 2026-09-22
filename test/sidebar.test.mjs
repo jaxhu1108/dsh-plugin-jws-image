@@ -77,7 +77,12 @@ async function loadExports(harness = createHarness()) {
   }
   // eslint-disable-next-line no-new-func
   new Function('window', 'require', source)(window, require)
-  return { exports: captured.factory(require), harness }
+  const exports = captured.factory(require)
+  // The browser-detected language follows the machine's locale (Node exposes a
+  // `navigator` whose `language` is the host's), so pin it rather than letting
+  // the Chinese expectations below depend on where the suite is run.
+  exports.setLanguage('zh')
+  return { exports, harness }
 }
 
 /** Every element in a rendered tree. */
@@ -196,7 +201,18 @@ test('the sidebar services are awaited, not required', async () => {
   // `sidebarRightTabs` must NOT be in the plugin's own inject list: that would
   // stop the browser half from loading at all on a build with no right column.
   assert.deepEqual(exports.inject, ['slots'])
-  assert.deepEqual(state.injected, [['slots', 'sidebarRightTabs', 'sidebarRight']])
+  // `slots` is the one service this half cannot work without — it is declared
+  // up front. Everything optional is awaited through `ctx.inject` instead.
+  assert.equal(state.injected.flat().includes('slots'), true)
+  for (const service of ['sidebarRightTabs', 'sidebarRight']) {
+    assert.equal(state.injected.flat().includes(service), true, `${service} must be awaited`)
+    assert.equal(exports.inject.includes(service), false, `${service} must not gate activation`)
+  }
+  // The tab type, body and chip text wait on the column, not on activation.
+  assert.equal(
+    state.injected.some((services) => services.includes('sidebarRightTabs') && services.includes('sidebarRight')),
+    true,
+  )
 })
 
 test('a build with no right column registers nothing and stays quiet', async () => {
@@ -338,6 +354,6 @@ test('the panel body is the same window content the modal shows', async () => {
   // Both surfaces must render the same component tree, so a fix to the form
   // cannot land on one and miss the other.
   const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(source, /h\(WindowBody, \{ state, onReload: load \}\)/u)
-  assert.match(source, /h\(WindowBody, \{ state, onReload: reload \}\)/u)
+  assert.match(source, /h\(WindowBody, \{ state, onReload: load, session \}\)/u)
+  assert.match(source, /h\(WindowBody, \{ state, onReload: reload, session \}\)/u)
 })

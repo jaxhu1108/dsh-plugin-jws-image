@@ -7,9 +7,10 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { ROUTE_PREFIX, createRouteHandlers, publicModel, redact, referencesFromBody, registerRoutes } from '../lib/routes.js'
+import { ROUTE_PREFIX, createRouteHandlers, effectiveMaxAmount, publicModel, redact, referenceLimit, referencesFromBody, refusalForReferences, registerRoutes } from '../lib/routes.js'
 
 /** A request whose JSON body is the given value. */
 function postRequest(body, url = `${ROUTE_PREFIX}/x`) {
@@ -427,8 +428,8 @@ test('registerRoutes accepts an injected scope that carries connection directly'
     renderApiStatus: () => 'API: x',
     summarizeSpec: () => ({}),
     compareContract: () => ({ status: 'up-to-date', changes: [] }),
-  }), 10)
-  assert.equal(registered.length, 10)
+  }), 11)
+  assert.equal(registered.length, 11)
 })
 
 test('registerRoutes mounts every route under the shared prefix', () => {
@@ -456,13 +457,19 @@ test('registerRoutes mounts every route under the shared prefix', () => {
     summarizeSpec: () => ({}),
     compareContract: () => ({ status: 'up-to-date', changes: [] }),
   })
-  assert.equal(count, 10)
-  assert.equal(registered.length, 10)
+  assert.equal(count, 11)
+  assert.equal(registered.length, 11)
+  // The write endpoints; everything else is a read.
+  const writes = ['/key', '/quote', '/generate', '/history-delete', '/api-update']
   for (const route of registered) {
     assert.equal(route.path.startsWith(`${ROUTE_PREFIX}/`), true, route.path)
     assert.equal(route.requestBody, 'buffered')
     assert.equal(typeof route.fetch, 'function')
-    assert.deepEqual(route.methods, route.path.endsWith('/key') || route.path.endsWith('/quote') || route.path.endsWith('/generate') || route.path.endsWith('/api-update') ? ['POST'] : ['GET'])
+    assert.deepEqual(
+      route.methods,
+      writes.some((suffix) => route.path.endsWith(suffix)) ? ['POST'] : ['GET'],
+      route.path,
+    )
   }
 })
 
@@ -498,3 +505,216 @@ test('redact hides a key and tolerates a missing one', () => {
   assert.equal(redact('plain', undefined), 'plain')
   assert.equal(redact(undefined, 'k'), '接口暂不可用')
 })
+
+// #region per-call budget
+
+test('a per-call budget may tighten the ceiling but never raise it', () => {
+  // The window's field is a tighter cap, not a replacement. These routes are
+  // reachable from the page, so accepting a looser number would turn the
+  // operator's circuit breaker into a suggestion.
+  assert.equal(effectiveMaxAmount(5, 20), 5)
+  assert.equal(effectiveMaxAmount(20, 20), 20)
+  assert.equal(effectiveMaxAmount(999, 20), 20, 'a raised cap must be clamped')
+  assert.equal(effectiveMaxAmount(0.01, 20), 0.01)
+  // An absent or nonsensical request falls back to the ceiling, never to none.
+  assert.equal(effectiveMaxAmount(undefined, 20), 20)
+  assert.equal(effectiveMaxAmount(null, 20), 20)
+  assert.equal(effectiveMaxAmount(-1, 20), 20)
+  assert.equal(effectiveMaxAmount(Number.NaN, 20), 20)
+  assert.equal(effectiveMaxAmount('30', 20), 20)
+  assert.equal(effectiveMaxAmount(Number.POSITIVE_INFINITY, 20), 20)
+})
+
+test('a missing ceiling leaves the request as the only number there is', () => {
+  assert.equal(effectiveMaxAmount(5, undefined), 5)
+  assert.equal(effectiveMaxAmount(undefined, undefined), undefined)
+})
+
+test('quote honours a lowered budget and clamps a raised one', async () => {
+  const seen = []
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    runGeneration: async (options) => {
+      seen.push(options.maxAmount)
+      return { taskId: 't', files: [], amount: 0.5, currency: 'USD' }
+    },
+  })
+
+  // Lowered: the window's number is what the circuit breaker uses.
+  const lowered = await bodyOf(await handlers.quote(postRequest({ prompt: 'a cat', maxAmount: 5 })))
+  assert.equal(lowered.maxAmount, 5)
+
+  // Raised: clamped back to the configured ceiling.
+  const raised = await bodyOf(await handlers.quote(postRequest({ prompt: 'a cat', maxAmount: 999 })))
+  assert.equal(raised.maxAmount, 20)
+
+  // Absent: the ceiling.
+  const absent = await bodyOf(await handlers.quote(postRequest({ prompt: 'a cat' })))
+  assert.equal(absent.maxAmount, 20)
+
+  // And the generation path runs under the same number.
+  await handlers.generate(postRequest({ prompt: 'a cat', maxAmount: 7 }))
+  await handlers.generate(postRequest({ prompt: 'a cat', maxAmount: 999 }))
+  assert.deepEqual(seen, [7, 20])
+})
+
+test('a generation records the budget it actually ran under', async () => {
+  const { handlers, state } = makeHandlers({ key: 'jws_live_x' })
+  await handlers.generate(postRequest({ prompt: 'a cat', maxAmount: 3 }))
+  // "The budget" is not one number any more, so the entry has to carry its own.
+  assert.equal(state.generated[0].maxAmount, 3)
+})
+
+// #endregion
+
+// #region per-model reference limits
+
+test('referenceLimit reads only a real capability', () => {
+  assert.equal(referenceLimit({ capabilities: { maxInputImages: 0 } }), 0)
+  assert.equal(referenceLimit({ capabilities: { maxInputImages: 15 } }), 15)
+  // An unknown capability must not become a limit of its own.
+  assert.equal(referenceLimit({ capabilities: {} }), undefined)
+  assert.equal(referenceLimit({}), undefined)
+  assert.equal(referenceLimit({ capabilities: { maxInputImages: -1 } }), undefined)
+  assert.equal(referenceLimit({ capabilities: { maxInputImages: 1.5 } }), undefined)
+})
+
+test('a model that takes no references is refused, not silently trimmed', () => {
+  const textOnly = { model: 'image:grok', modes: ['text-to-image'], capabilities: { maxInputImages: 0 } }
+  assert.match(refusalForReferences(textOnly, 1), /不支持图生图/u)
+
+  const zeroCap = { model: 'image:zero', modes: ['text-to-image', 'image-to-image'], capabilities: { maxInputImages: 0 } }
+  assert.match(refusalForReferences(zeroCap, 1), /不接受参考图/u)
+
+  const capped = { model: 'image:one', modes: ['image-to-image'], capabilities: { maxInputImages: 1 } }
+  assert.equal(refusalForReferences(capped, 1), undefined)
+  assert.match(refusalForReferences(capped, 2), /最多接受 1 张/u)
+
+  // No call without references, so no refusal to hand back.
+  assert.equal(refusalForReferences(textOnly, 0), undefined)
+})
+
+test('an unknown capability is never turned into a refusal', () => {
+  // A trimmed catalog record must not make a model the API would accept
+  // unusable — the API is the authority on what it will take.
+  assert.equal(refusalForReferences({ model: 'image:a' }, 3), undefined)
+  assert.equal(refusalForReferences({ model: 'image:a', modes: [], capabilities: {} }, 3), undefined)
+})
+
+test('the quote refuses a reference count the model cannot take', async () => {
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    resolveModelAndParams: async () => ({
+      model: 'image:one',
+      params: { count: 1 },
+      modes: ['image-to-image'],
+      capabilities: { maxInputImages: 1 },
+      catalogPicked: false,
+    }),
+  })
+  const data = Buffer.from([1]).toString('base64')
+  const one = { mimeType: 'image/png', data }
+  assert.equal((await handlers.quote(postRequest({ prompt: 'a cat', references: [one] }))).status, 200)
+  const response = await handlers.quote(postRequest({ prompt: 'a cat', references: [one, one] }))
+  assert.equal(response.status, 400)
+  assert.match((await bodyOf(response)).error, /最多接受 1 张/u)
+})
+
+test('the quote reports the ceiling so the window can bound its picker', async () => {
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    resolveModelAndParams: async () => ({
+      model: 'image:many',
+      params: { count: 1 },
+      modes: ['text-to-image', 'image-to-image'],
+      capabilities: { maxInputImages: 15 },
+      catalogPicked: false,
+    }),
+  })
+  const body = await bodyOf(await handlers.quote(postRequest({ prompt: 'a cat' })))
+  assert.equal(body.referenceLimit, 15)
+})
+
+// #endregion
+
+// #region history management
+
+/** Seed a history through the generate route, so the shape is the real one. */
+async function seedHistory(handlers, prompts) {
+  for (const prompt of prompts) {
+    await handlers.generate(postRequest({ prompt }))
+  }
+}
+
+test('history-delete drops one task and keeps the rest', async () => {
+  const persisted = []
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: [], amount: 1, currency: 'USD' }),
+    persistHistory: async (entries) => { persisted.push(entries.map((entry) => entry.taskId)) },
+  })
+  await seedHistory(handlers, ['a', 'b', 'c'])
+  const writesBeforeDelete = persisted.length
+  assert.deepEqual(state.generated.map((entry) => entry.taskId), ['task-3', 'task-2', 'task-1'])
+
+  const body = await bodyOf(await handlers.historyDelete(postRequest({ taskId: 'task-2' }, `${ROUTE_PREFIX}/history-delete`)))
+  assert.equal(body.ok, true)
+  assert.equal(body.removed, 1)
+  assert.deepEqual(body.entries.map((entry) => entry.taskId), ['task-3', 'task-1'])
+  // The in-memory array is shared with the tool half, so it must be mutated in
+  // place rather than replaced.
+  assert.deepEqual(state.generated.map((entry) => entry.taskId), ['task-3', 'task-1'])
+  // And the surviving list is what got written back — one extra write, at the end.
+  assert.equal(persisted.length, writesBeforeDelete + 1)
+  assert.deepEqual(persisted.at(-1), ['task-3', 'task-1'])
+})
+
+test('history-delete clears everything with all: true', async () => {
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: [], amount: 1, currency: 'USD' }),
+  })
+  await seedHistory(handlers, ['a', 'b'])
+  const body = await bodyOf(await handlers.historyDelete(postRequest({ all: true }, `${ROUTE_PREFIX}/history-delete`)))
+  assert.equal(body.removed, 2)
+  assert.deepEqual(body.entries, [])
+  assert.equal(state.generated.length, 0)
+})
+
+test('history-delete asks for a target, and 404s on one it never had', async () => {
+  const { handlers } = makeHandlers({ key: 'jws_live_x' })
+  assert.equal((await handlers.historyDelete(postRequest({}, `${ROUTE_PREFIX}/history-delete`))).status, 400)
+  assert.equal((await handlers.historyDelete(postRequest({ taskId: 'nope' }, `${ROUTE_PREFIX}/history-delete`))).status, 404)
+})
+
+test('history-delete never touches the files on disk', async () => {
+  // The images are already paid for, and a mis-click on "清空历史" must not be
+  // able to destroy them; the output directory stays their only owner.
+  const source = await readFile(new URL('../lib/routes.js', import.meta.url), 'utf8')
+  const start = source.indexOf('async historyDelete(')
+  const end = source.indexOf('\n    },', start)
+  const handler = source.slice(start, end)
+  assert.doesNotMatch(handler, /\brm\b|unlink|rmdir/u)
+})
+
+test('a history deletion survives an unwritable home directory', async () => {
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: [], amount: 1, currency: 'USD' }),
+    persistHistory: async () => { throw new Error('EACCES') },
+  })
+  await seedHistory(handlers, ['a'])
+  const response = await handlers.historyDelete(postRequest({ all: true }, `${ROUTE_PREFIX}/history-delete`))
+  // The in-memory list is already correct; the failed write must not undo it.
+  assert.equal(response.status, 200)
+  assert.equal(state.generated.length, 0)
+})
+
+test('history-image says the task is gone rather than blaming a restart', async () => {
+  const { handlers } = makeHandlers({ key: 'jws_live_x' })
+  const response = await handlers.historyImage(getRequest(`${ROUTE_PREFIX}/history-image?taskId=ghost&index=0`))
+  assert.equal(response.status, 404)
+  assert.match((await bodyOf(response)).error, /已被删除/u)
+})
+
+// #endregion
