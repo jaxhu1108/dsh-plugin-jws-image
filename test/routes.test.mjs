@@ -7,8 +7,9 @@
  */
 
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import { ROUTE_PREFIX, createRouteHandlers, effectiveMaxAmount, insideDirectory, publicModel, redact, referenceLimit, referencesFromBody, refusalForReferences, registerRoutes } from '../lib/routes.js'
@@ -54,7 +55,7 @@ function makeHandlers(overrides = {}) {
       baseURL: 'https://image.aijws.com',
       defaultModel: undefined,
       maxAmount: 20,
-      outputDir: '/tmp/out',
+      outputDir: overrides.outputDir ?? '/tmp/out',
       credentialsDir: '/tmp/cfg',
       cacheFile: '/tmp/cache.json',
       snapshotCacheFile: '/tmp/snapshot.json',
@@ -829,6 +830,54 @@ test('insideDirectory refuses the directory itself and anything beside it', () =
   assert.equal(insideDirectory(undefined, '/tmp/out/a.png'), false)
   // A sibling whose name merely starts with the same characters is outside.
   assert.equal(insideDirectory('/tmp/out', '/tmp/output/a.png'), false)
+})
+
+test('against the real filesystem the bytes go, and so does the directory they emptied', async () => {
+  // Every other deletion test here injects `deleteFile` / `removeEmptyDir`, so
+  // none of them can catch a path that resolves to the wrong place, or a
+  // directory that is rmdir'd while something is still inside it. This one runs
+  // the real unlink/rmdir and then looks at the disk.
+  const root = await mkdtemp(join(tmpdir(), 'jws-del-'))
+  const doomed = join(root, 'task-1')
+  const kept = join(root, 'task-2')
+  try {
+    await mkdir(doomed, { recursive: true })
+    await mkdir(kept, { recursive: true })
+    const first = join(doomed, 'image-1.png')
+    const second = join(doomed, 'image-2.png')
+    // Recorded in the history, so it is a deletion target.
+    await writeFile(first, 'one')
+    await writeFile(second, 'two')
+    // Present on disk but never recorded: the deletion path is driven by the
+    // history, not by a directory scan, so this must survive untouched.
+    const survivor = join(kept, 'image-1.png')
+    await writeFile(survivor, 'three')
+
+    const { handlers, state } = makeHandlers({
+      key: 'jws_live_x',
+      outputDir: root,
+      runGeneration: async () => ({ taskId: 'task-1', files: [first, second], amount: 1, currency: 'USD' }),
+    })
+    await seedHistory(handlers, ['a'])
+
+    const body = await bodyOf(await handlers.historyDelete(
+      postRequest({ all: true, deleteFiles: true }, `${ROUTE_PREFIX}/history-delete`),
+    ))
+    assert.equal(body.deletedFiles, 2)
+    assert.deepEqual(body.failedFiles, [])
+    assert.equal(state.generated.length, 0)
+
+    await assert.rejects(stat(first), { code: 'ENOENT' })
+    await assert.rejects(stat(second), { code: 'ENOENT' })
+    // Empty by now, so rmdir took it - and the empty-directory failure mode
+    // (ENOTEMPTY) is exactly what a non-empty sibling would have produced.
+    await assert.rejects(stat(doomed), { code: 'ENOENT' })
+    // The unrecorded task is still whole, directory included.
+    assert.equal((await stat(survivor)).size, 5)
+    assert.equal((await stat(kept)).isDirectory(), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('the deletion path removes files one by one, never a whole tree', async () => {
