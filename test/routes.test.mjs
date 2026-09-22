@@ -8,9 +8,10 @@
 
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import test from 'node:test'
 
-import { ROUTE_PREFIX, createRouteHandlers, effectiveMaxAmount, publicModel, redact, referenceLimit, referencesFromBody, refusalForReferences, registerRoutes } from '../lib/routes.js'
+import { ROUTE_PREFIX, createRouteHandlers, effectiveMaxAmount, insideDirectory, publicModel, redact, referenceLimit, referencesFromBody, refusalForReferences, registerRoutes } from '../lib/routes.js'
 
 /** A request whose JSON body is the given value. */
 function postRequest(body, url = `${ROUTE_PREFIX}/x`) {
@@ -81,6 +82,8 @@ function makeHandlers(overrides = {}) {
     writeApiCache: async (file, value) => { state.caches.push({ file, value }) },
     writeFileAtomic: async () => {},
     ...(overrides.readImageFile === undefined ? {} : { readImageFile: overrides.readImageFile }),
+    ...(overrides.deleteFile === undefined ? {} : { deleteFile: overrides.deleteFile }),
+    ...(overrides.removeEmptyDir === undefined ? {} : { removeEmptyDir: overrides.removeEmptyDir }),
     ...(overrides.persistHistory === undefined ? {} : { persistHistory: overrides.persistHistory }),
     renderApiStatus: (result) => `API: ${result.status}`,
     summarizeSpec: () => ({ infoVersion: '1.1.0', docSha256: 'b', endpoints: ['GET /v1/x', 'GET /v1/y'], requiredFields: {}, responseFields: {} }),
@@ -687,14 +690,158 @@ test('history-delete asks for a target, and 404s on one it never had', async () 
   assert.equal((await handlers.historyDelete(postRequest({ taskId: 'nope' }, `${ROUTE_PREFIX}/history-delete`))).status, 404)
 })
 
-test('history-delete never touches the files on disk', async () => {
+test('by default a history deletion never touches the files on disk', async () => {
   // The images are already paid for, and a mis-click on "清空历史" must not be
-  // able to destroy them; the output directory stays their only owner.
+  // able to destroy them; the output directory stays their only owner. Deleting
+  // the bytes is a second, explicit decision.
+  const removed = []
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    deleteFile: async (path) => { removed.push(path) },
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: ['/tmp/out/task-1/image-1.png'], amount: 1, currency: 'USD' }),
+  })
+  await seedHistory(handlers, ['a', 'b'])
+  await handlers.historyDelete(postRequest({ all: true }, `${ROUTE_PREFIX}/history-delete`))
+  assert.deepEqual(removed, [])
+  assert.equal(state.generated.length, 0)
+
+  // Even an explicit deleteFiles: false is still records-only.
+  removed.length = 0
+  await seedHistory(handlers, ['c'])
+  assert.equal(state.generated[0].taskId, 'task-1')
+  await handlers.historyDelete(postRequest({ taskId: 'task-1', deleteFiles: false }, `${ROUTE_PREFIX}/history-delete`))
+  assert.deepEqual(removed, [])
+  assert.equal(state.generated.length, 0)
+})
+
+test('deleteFiles: true removes the recorded files and reports the count', async () => {
+  const removed = []
+  const dirs = []
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    deleteFile: async (path) => { removed.push(path) },
+    removeEmptyDir: async (dir) => { dirs.push(dir) },
+    runGeneration: async () => ({
+      taskId: `task-${state.generated.length + 1}`,
+      files: [`/tmp/out/task-${state.generated.length + 1}/image-1.png`, `/tmp/out/task-${state.generated.length + 1}/image-2.png`],
+      amount: 1,
+      currency: 'USD',
+    }),
+  })
+  await seedHistory(handlers, ['a'])
+  const body = await bodyOf(await handlers.historyDelete(
+    postRequest({ all: true, deleteFiles: true }, `${ROUTE_PREFIX}/history-delete`),
+  ))
+  assert.equal(body.ok, true)
+  assert.equal(body.removed, 1)
+  assert.equal(body.deletedFiles, 2)
+  assert.deepEqual(body.failedFiles, [])
+  assert.equal(removed.length, 2)
+  // The resolved path is what gets handed to the filesystem primitive.
+  assert.deepEqual(removed, [
+    resolve('/tmp/out/task-1/image-1.png'),
+    resolve('/tmp/out/task-1/image-2.png'),
+  ])
+  // The per-task directory is empty now, and `rmdir` refuses a non-empty one,
+  // so this can never take anything with it.
+  assert.deepEqual(dirs, ['/tmp/out/task-1'].map((dir) => resolve(dir)))
+})
+
+test('a file that is already gone counts as deleted, not as a failure', async () => {
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    deleteFile: async () => { const error = new Error('ENOENT'); error.code = 'ENOENT'; throw error },
+    removeEmptyDir: async () => {},
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: ['/tmp/out/task-1/image-1.png'], amount: 1, currency: 'USD' }),
+  })
+  await seedHistory(handlers, ['a'])
+  const body = await bodyOf(await handlers.historyDelete(
+    postRequest({ all: true, deleteFiles: true }, `${ROUTE_PREFIX}/history-delete`),
+  ))
+  // Missing is the outcome the caller asked for, not a problem to report.
+  assert.equal(body.deletedFiles, 1)
+  assert.deepEqual(body.failedFiles, [])
+})
+
+test('a file that cannot be deleted is reported, and the record still goes', async () => {
+  const { handlers, state } = makeHandlers({
+    key: 'jws_live_x',
+    deleteFile: async () => { throw new Error('EBUSY: resource busy or locked') },
+    removeEmptyDir: async () => {},
+    runGeneration: async () => ({ taskId: `task-${state.generated.length + 1}`, files: ['/tmp/out/task-1/image-1.png'], amount: 1, currency: 'USD' }),
+  })
+  await seedHistory(handlers, ['a'])
+  const body = await bodyOf(await handlers.historyDelete(
+    postRequest({ all: true, deleteFiles: true }, `${ROUTE_PREFIX}/history-delete`),
+  ))
+  // The record has to go either way: keeping it would leave the window listing
+  // a task the user asked to forget, with no way to retry.
+  assert.equal(body.removed, 1)
+  assert.equal(body.deletedFiles, 0)
+  assert.equal(body.failedFiles.length, 1)
+  assert.match(body.failedFiles[0].error, /EBUSY/u)
+  assert.equal(body.failedFiles[0].path, '/tmp/out/task-1/image-1.png')
+  assert.equal(state.generated.length, 0)
+})
+
+test('a record pointing outside the output directory cannot delete anything', async () => {
+  // The paths come from the server's own history file, but that file is plain
+  // JSON on disk: a hand-edited record must not turn "delete this task's
+  // images" into deleting something else.
+  const removed = []
+  const { handlers } = makeHandlers({ key: 'jws_live_x', deleteFile: async (path) => { removed.push(path) } })
+  // Seeded through the route with escaped paths, exactly as a corrupt file
+  // would look once read back at boot.
+  const { handlers: seeded, state } = makeHandlers({
+    key: 'jws_live_x',
+    deleteFile: async (path) => { removed.push(path) },
+    runGeneration: async () => ({
+      taskId: 'task-1',
+      files: ['../../windows/system32/config/SAM', '/tmp/outside/image-1.png', '/tmp/out/task-1/image-1.png'],
+      amount: 1,
+      currency: 'USD',
+    }),
+  })
+  await seeded.generate(postRequest({ prompt: 'a cat' }))
+  assert.equal(state.generated.length, 1)
+
+  const body = await bodyOf(await seeded.historyDelete(
+    postRequest({ all: true, deleteFiles: true }, `${ROUTE_PREFIX}/history-delete`),
+  ))
+  // Exactly one of the three is inside the output directory.
+  assert.equal(removed.length, 1)
+  assert.equal(resolve(removed[0]), resolve('/tmp/out/task-1/image-1.png'))
+  assert.equal(body.deletedFiles, 1)
+  // And the two it refused say so, rather than failing silently.
+  assert.equal(body.failedFiles.length, 2)
+  assert.equal(body.failedFiles.every((item) => item.error.includes('不在输出目录里')), true)
+  assert.equal(typeof handlers.historyDelete, 'function')
+})
+
+test('insideDirectory refuses the directory itself and anything beside it', () => {
+  // The deletion path must never be able to remove the directory it writes into.
+  assert.equal(insideDirectory('/tmp/out', '/tmp/out/task-1/image-1.png'), true)
+  assert.equal(insideDirectory('/tmp/out', '/tmp/out'), false)
+  assert.equal(insideDirectory('/tmp/out', '/tmp/out/'), false)
+  assert.equal(insideDirectory('/tmp/out', '/tmp/outside/image-1.png'), false)
+  assert.equal(insideDirectory('/tmp/out', '/tmp/out/../../etc/passwd'), false)
+  assert.equal(insideDirectory('/tmp/out', ''), false)
+  assert.equal(insideDirectory(undefined, '/tmp/out/a.png'), false)
+  // A sibling whose name merely starts with the same characters is outside.
+  assert.equal(insideDirectory('/tmp/out', '/tmp/output/a.png'), false)
+})
+
+test('the deletion path removes files one by one, never a whole tree', async () => {
+  // `rm -rf` on an absolute path assembled from a history record is exactly the
+  // shape of bug this feature could introduce, so pin the primitives instead.
   const source = await readFile(new URL('../lib/routes.js', import.meta.url), 'utf8')
-  const start = source.indexOf('async historyDelete(')
-  const end = source.indexOf('\n    },', start)
-  const handler = source.slice(start, end)
-  assert.doesNotMatch(handler, /\brm\b|unlink|rmdir/u)
+  const start = source.indexOf('async function deleteEntryFiles(')
+  const end = source.indexOf('\n  }', start)
+  const helper = source.slice(start, end)
+  assert.match(helper, /await deleteFile\(target\)/u)
+  assert.match(helper, /await removeEmptyDir\(directory\)/u)
+  // No recursive removal, and no shelling out.
+  assert.doesNotMatch(helper, /rmSync|rm\(|recursive|child_process|exec\(/u)
 })
 
 test('a history deletion survives an unwritable home directory', async () => {

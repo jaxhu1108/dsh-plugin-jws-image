@@ -1463,3 +1463,219 @@ test('the chip text follows the language without re-registering the tab', async 
 })
 
 // #endregion
+
+// #region deleting the files too
+
+/** History entries shaped the way the host records them. */
+function historyEntries() {
+  return [
+    { taskId: 'a', files: ['/tmp/out/a/image-1.png'], amount: 1, currency: 'USD', model: 'image:a', prompt: 'one' },
+    { taskId: 'b', files: [], amount: 1, currency: 'USD', model: 'image:b', prompt: 'two' },
+  ]
+}
+
+/** The delete buttons of a rendered history list, in order. */
+function deleteButtons(tree) {
+  return tree.filter((node) => node.type === 'button' && node.props.className === 'jws-link'
+    && /^(删除|再点一次删除)/u.test(String(node.children[0])))
+}
+
+/** The clear-all button, whatever it currently says. */
+function clearButton(tree) {
+  return tree.filter((node) => node.type === 'button' && node.props.className === 'jws-link'
+    && /^(清空历史|再点一次)/u.test(String(node.children[0])))[0]
+}
+
+test('deleting the files is opt-in, off by default, and explained', async () => {
+  const { exports, harness } = await loadExports()
+  const modes = []
+  const props = { entries: historyEntries(), onRerun: () => {}, withFiles: false, onFilesChange: (value) => modes.push(value) }
+  const tree = walk(harness.render(exports.HistoryList, props))
+  const toggle = tree.find((node) => node.type === 'input' && node.props.type === 'checkbox')
+  assert.ok(toggle, 'the mode must be switchable from the list itself')
+  assert.equal(toggle.props.checked, false)
+  // Off: no warning banner, because there is nothing to warn about.
+  assert.equal(allByClass(tree, 'jws-hint').length, 0)
+  toggle.props.onChange({ target: { checked: true } })
+  assert.deepEqual(modes, [true])
+})
+
+test('with the files included, the warning is on screen while the mode is on', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: historyEntries(),
+    onRerun: () => {},
+    withFiles: true,
+    onFilesChange: () => {},
+  }))
+  const hints = allByClass(tree, 'jws-hint').map((node) => String(node.children[0]))
+  assert.equal(hints.some((text) => text.includes('无法恢复')), true)
+})
+
+test('with the files included, per-entry deletion takes two clicks', async () => {
+  const { exports, harness } = await loadExports()
+  const deleted = []
+  const props = {
+    entries: historyEntries(),
+    onRerun: () => {},
+    withFiles: true,
+    onFilesChange: () => {},
+    onDelete: (entry) => deleted.push(entry.taskId),
+  }
+  const render = () => walk(harness.render(exports.HistoryList, props))
+
+  deleteButtons(render())[0].props.onClick()
+  // The image is about to be gone for good; one stray click must not do it.
+  assert.deepEqual(deleted, [])
+
+  const armed = deleteButtons(render())
+  assert.match(String(armed[0].children[0]), /^再点一次删除/u)
+  assert.equal(armed[0].props['data-danger'], 'true')
+  // Arming one row must not arm the other.
+  assert.equal(String(armed[1].children[0]), '删除')
+  assert.equal(armed[1].props['data-danger'], 'false')
+
+  armed[0].props.onClick()
+  assert.deepEqual(deleted, ['a'])
+})
+
+test('with the files kept, per-entry deletion stays one click', async () => {
+  const { exports, harness } = await loadExports()
+  const deleted = []
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: historyEntries(),
+    onRerun: () => {},
+    withFiles: false,
+    onFilesChange: () => {},
+    onDelete: (entry) => deleted.push(entry.taskId),
+  }))
+  // Recoverable — the file is still on disk — so no second click is demanded.
+  deleteButtons(tree)[0].props.onClick()
+  assert.deepEqual(deleted, ['a'])
+})
+
+test('the clear-all warning names the files when they are included', async () => {
+  const { exports, harness } = await loadExports()
+  const cleared = []
+  const props = {
+    entries: historyEntries(),
+    onRerun: () => {},
+    withFiles: true,
+    onFilesChange: () => {},
+    onClear: () => cleared.push('clear'),
+  }
+  const render = () => walk(harness.render(exports.HistoryList, props))
+
+  clearButton(render()).props.onClick()
+  assert.deepEqual(cleared, [])
+  assert.match(String(clearButton(render()).children[0]), /连磁盘文件一起删/u)
+  assert.equal(clearButton(render()).props['data-danger'], 'true')
+  clearButton(render()).props.onClick()
+  assert.deepEqual(cleared, ['clear'])
+})
+
+test('flipping the file mode disarms whatever was armed', async () => {
+  const { exports, harness } = await loadExports()
+  const deleted = []
+  const modes = []
+  const props = {
+    entries: historyEntries(),
+    onRerun: () => {},
+    withFiles: true,
+    onFilesChange: (value) => modes.push(value),
+    onDelete: (entry) => deleted.push(entry.taskId),
+  }
+  const render = () => walk(harness.render(exports.HistoryList, props))
+
+  deleteButtons(render())[0].props.onClick()
+  assert.deepEqual(deleted, [])
+
+  // A click made under the destructive mode must not carry into the safe one.
+  const toggle = render().find((node) => node.type === 'input' && node.props.type === 'checkbox')
+  toggle.props.onChange({ target: { checked: false } })
+  assert.deepEqual(modes, [false])
+  assert.equal(String(deleteButtons(render())[0].children[0]), '删除')
+})
+
+test('the window asks the host for the files only once the mode is on', async () => {
+  // End to end through the window body: the checkbox has to change what the
+  // request says, not just what the screen shows.
+  const harness = createHarness({ runEffects: true })
+  const { exports } = await loadExports(harness)
+  const state = { hasKey: true, maxAmount: 20, budgetCurrency: 'CNY', outputDir: '/tmp/out' }
+  // The first deletion keeps the list, so the toggle is still there to flip.
+  const reply = { body: { ok: true, removed: 1, entries: historyEntries(), deletedFiles: 0, failedFiles: [] } }
+  const render = () => walk(harness.render(exports.WindowBody, { state, onReload: () => {} }))
+  const tick = () => new Promise((resolve) => { setTimeout(resolve, 0) })
+
+  await withFetch({
+    '/catalog': { body: { ok: true, models: [MODEL] } },
+    '/history': { body: { ok: true, entries: historyEntries() } },
+    '/history-delete': reply,
+  }, async (calls) => {
+    render()
+    await tick()
+
+    // Off: the request says so explicitly rather than leaving it to a default.
+    let tree = render()
+    deleteButtons(tree)[0].props.onClick()
+    await tick()
+    assert.deepEqual(calls.at(-1).body, { taskId: 'a', deleteFiles: false })
+    let notice = allByClass(render(), 'jws-ok').map((node) => String(node.children[0]))
+    assert.equal(notice.some((text) => text.includes('磁盘文件保留')), true)
+
+    // Now the destructive mode, which needs two clicks on the row.
+    reply.body = { ok: true, removed: 1, entries: [], deletedFiles: 1, failedFiles: [] }
+    tree = render()
+    tree.find((node) => node.type === 'input' && node.props.type === 'checkbox')
+      .props.onChange({ target: { checked: true } })
+    tree = render()
+    deleteButtons(tree)[0].props.onClick()
+    tree = render()
+    deleteButtons(tree)[0].props.onClick()
+    await tick()
+    assert.deepEqual(calls.at(-1).body, { taskId: 'a', deleteFiles: true })
+    // And the outcome is stated: what went, and how many files with it.
+    notice = allByClass(render(), 'jws-ok').map((node) => String(node.children[0]))
+    assert.equal(notice.some((text) => text.includes('1 个文件')), true)
+  })
+})
+
+test('a file the host could not delete is surfaced, not swallowed', async () => {
+  const harness = createHarness({ runEffects: true })
+  const { exports } = await loadExports(harness)
+  const state = { hasKey: true, maxAmount: 20, budgetCurrency: 'CNY', outputDir: '/tmp/out' }
+  const render = () => walk(harness.render(exports.WindowBody, { state, onReload: () => {} }))
+  const tick = () => new Promise((resolve) => { setTimeout(resolve, 0) })
+
+  await withFetch({
+    '/catalog': { body: { ok: true, models: [MODEL] } },
+    '/history': { body: { ok: true, entries: historyEntries() } },
+    '/history-delete': {
+      body: {
+        ok: true,
+        removed: 1,
+        entries: [],
+        deletedFiles: 0,
+        failedFiles: [{ path: '/tmp/out/a/image-1.png', error: 'EBUSY: resource busy or locked' }],
+      },
+    },
+  }, async () => {
+    render()
+    await tick()
+    let tree = render()
+    tree.find((node) => node.type === 'input' && node.props.type === 'checkbox')
+      .props.onChange({ target: { checked: true } })
+    tree = render()
+    deleteButtons(tree)[0].props.onClick()
+    tree = render()
+    deleteButtons(tree)[0].props.onClick()
+    await tick()
+    // A file the user asked to delete and did not get deleted is exactly the
+    // thing they would never find out about otherwise.
+    const errors = allByClass(render(), 'jws-error').map((node) => String(node.children[0]))
+    assert.equal(errors.some((text) => text.includes('EBUSY') && text.includes('image-1.png')), true)
+  })
+})
+
+// #endregion
