@@ -408,9 +408,114 @@ test('generating renders the returned image and lists the files', async () => {
       tree = walk(harness.render(exports.GenerateForm, props))
       const image = tree.find((node) => node.type === 'img')
       assert.equal(image.props.src, 'data:image/png;base64,AAEC')
-      assert.match(byClass(tree, 'jws-path').children[0], /image-1\.png/u)
+      // The path is shown under the preview (the cost line has its own paths).
+      const paths = allByClass(tree, 'jws-path').map((node) => String(node.children[0]))
+      assert.ok(paths.some((text) => /image-1\.png/u.test(text)), paths.join(' | '))
+      // The window must tell the user what they paid, not just that a file exists.
+      const cost = allByClass(tree, 'jws-cost').map((node) => JSON.stringify(node)).join(' ')
+      assert.match(cost, /0\.5 USD/u)
+      assert.match(cost, /t9/u)
     },
   )
+})
+
+test('the cost line names the amount, the model and the task', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.CostLine, {
+    result: {
+      amount: 0.053,
+      currency: 'USD',
+      taskId: 'image:abc',
+      model: 'image:x',
+      params: { size: 'auto', count: 1 },
+      images: [{ path: '/tmp/a.png', mediaType: 'image/png', data: 'AA' }],
+    },
+  }))
+  const text = tree.map((node) => (typeof node.children?.[0] === 'string' ? node.children[0] : '')).join(' ')
+  assert.match(text, /已生成 1 张/u)
+  assert.match(text, /0\.053 USD/u)
+  assert.match(text, /image:abc/u)
+})
+
+test('the cost line renders nothing before a generation', async () => {
+  const { exports, harness } = await loadExports()
+  assert.equal(harness.render(exports.CostLine, { result: null }), null)
+})
+
+test('the history list offers a parameter refill per entry', async () => {
+  const { exports, harness } = await loadExports()
+  let refilled = null
+  const tree = walk(harness.render(exports.HistoryList, {
+    entries: [{ taskId: 't1', model: 'image:x', params: { size: 'auto', count: 1 }, prompt: '一只猫', amount: 0.05, currency: 'USD' }],
+    onRerun: (entry) => { refilled = entry },
+  }))
+  const button = tree.find((node) => node.type === 'button' && node.children[0] === '回填参数')
+  assert.ok(button, 'history entries must offer a refill action')
+  button.props.onClick()
+  assert.equal(refilled.taskId, 't1')
+  assert.match(tree.map((n) => String(n.children?.[0] ?? '')).join(' '), /一只猫/u)
+})
+
+test('an empty history renders nothing rather than an empty box', async () => {
+  const { exports, harness } = await loadExports()
+  assert.equal(harness.render(exports.HistoryList, { entries: [], onRerun: () => {} }), null)
+  assert.equal(harness.render(exports.HistoryList, { entries: undefined, onRerun: () => {} }), null)
+})
+
+test('maxCount reads the model capability and defaults to 4', async () => {
+  const { exports } = await loadExports()
+  assert.equal(exports.maxCount({ capabilities: { maxOutputImages: 8 } }), 8)
+  assert.equal(exports.maxCount({ capabilities: {} }), 4)
+  assert.equal(exports.maxCount({}), 4)
+  assert.equal(exports.maxCount({ capabilities: { maxOutputImages: 0 } }), 4)
+})
+
+test('looksLikeAuthFailure recognises the cases the user can fix', async () => {
+  const { exports } = await loadExports()
+  assert.equal(exports.looksLikeAuthFailure('JWS HTTP 401: unauthorized'), true)
+  assert.equal(exports.looksLikeAuthFailure('密钥格式不对'), true)
+  assert.equal(exports.looksLikeAuthFailure('报价已过期'), false)
+  assert.equal(exports.looksLikeAuthFailure(undefined), false)
+})
+
+test('the model picker gets a full-width row of its own', async () => {
+  // The model id is the longest string in the form; squeezing it into a
+  // quarter-width column truncated it in the shipped layout.
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.GenerateForm, {
+    models: [MODEL],
+    maxAmount: 20,
+    budgetCurrency: 'CNY',
+  }))
+  const selects = tree.filter((node) => node.type === 'select')
+  const rows = tree.filter((node) => node.props?.className === 'jws-row')
+  assert.equal(rows.length, 2, 'the form uses two rows: the model, then the compact fields')
+  // Row 1 holds the model alone, so a long model id is never truncated.
+  const modelRow = walk(rows[0]).filter((node) => node.type === 'select')
+  assert.equal(modelRow.length, 1)
+  assert.equal(modelRow[0].props.value, 'image:dual')
+  assert.equal(rows[0].children[0].props.className, 'jws-field jws-field-wide')
+  // Row 2 holds the four compact fields together.
+  const compactRow = walk(rows[1]).filter((node) => node.type === 'select' || node.type === 'input')
+  assert.equal(compactRow.length, 4)
+  assert.equal(selects.length, 4)
+})
+
+test('a seed from history refills the form on mount', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.GenerateForm, {
+    models: [MODEL],
+    maxAmount: 20,
+    budgetCurrency: 'CNY',
+    seed: { model: 'image:dual', params: { size: '16:9', resolution: '2K', quality: 'high', count: 2 }, prompt: '一只猫' },
+  }))
+  const selects = tree.filter((node) => node.type === 'select')
+  assert.equal(selects[0].props.value, 'image:dual')
+  assert.equal(selects[1].props.value, '16:9')
+  assert.equal(selects[2].props.value, '2K')
+  assert.equal(selects[3].props.value, 'high')
+  const textarea = tree.find((node) => node.type === 'textarea')
+  assert.equal(textarea.props.value, '一只猫')
 })
 
 test('a host failure is rendered instead of thrown', async () => {
