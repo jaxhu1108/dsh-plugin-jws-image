@@ -1,2 +1,5 @@
 node_modules/
 *.tgz
+# Scratch space for test output and tarball-extraction checks. Kept out of git
+# for the same reason *.tgz is: it is a build artifact, not source.
+tmp/
