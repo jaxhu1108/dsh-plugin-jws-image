@@ -43,6 +43,38 @@ test('two generations never overwrite each other', async () => {
   assert.equal(two.files[0], join('/tmp/out', 'image-second', 'image-1.png'))
 })
 
+test('reference images are uploaded before the task is created', async () => {
+  const quoted = []
+  const { calls, client } = stubClient()
+  // Wrap rather than replace: the stub's own quote is what records the call
+  // order this test asserts.
+  const recording = {
+    ...client,
+    quote: async (input) => {
+      quoted.push(input)
+      return client.quote(input)
+    },
+  }
+  const result = await runGeneration({
+    client: recording,
+    args: {
+      prompt: 'x',
+      model: 'image:m',
+      params: { size: '1:1', resolution: '1K', quality: 'auto', count: 1 },
+      references: ['a.png'],
+      referenceFiles: [{ bytes: new Uint8Array([1, 2]), mimeType: 'image/png' }],
+    },
+    maxAmount: 20,
+    outputDir: '/tmp/out',
+    attach: async () => undefined,
+  })
+  // The upload sits between the quote and the create, sharing one request id.
+  assert.deepEqual(calls, ['quote', 'upload', 'create', 'wait', 'download'])
+  assert.equal(quoted[0].params.mode, 'image-to-image')
+  assert.equal(quoted[0].params.referenceCount, 1)
+  assert.equal(result.taskId, 'task1')
+})
+
 test('refuses to generate when the quote exceeds the budget', async () => {
   const { calls, client } = stubClient({ quote: async () => ({ quoteId: 'q', amount: 99, currency: 'CNY', expiresAt: new Date(Date.now() + 60000).toISOString() }) })
   const result = await runGeneration({

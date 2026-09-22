@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { ROUTE_PREFIX, createRouteHandlers, publicModel, redact, registerRoutes } from '../lib/routes.js'
+import { ROUTE_PREFIX, createRouteHandlers, publicModel, redact, referencesFromBody, registerRoutes } from '../lib/routes.js'
 
 /** A request whose JSON body is the given value. */
 function postRequest(body, url = `${ROUTE_PREFIX}/x`) {
@@ -223,6 +223,94 @@ test('a failing history write does not fail a generation that already happened',
   assert.equal(response.status, 200)
   assert.equal((await bodyOf(response)).ok, true)
 })
+
+// #region reference images
+
+test('referencesFromBody converts base64 into upload payloads', () => {
+  const data = Buffer.from([1, 2, 3]).toString('base64')
+  const { references, referenceFiles } = referencesFromBody({
+    references: [{ mimeType: 'image/jpeg', name: 'a.jpg', data }],
+  })
+  assert.equal(references.length, 1)
+  assert.equal(references[0].mimeType, 'image/jpeg')
+  assert.equal(references[0].name, 'a.jpg')
+  assert.deepEqual([...referenceFiles[0].bytes], [1, 2, 3])
+})
+
+test('referencesFromBody drops junk, caps at 16, and distrusts the mime type', () => {
+  const many = Array.from({ length: 20 }, (_, index) => ({
+    mimeType: 'image/png',
+    data: Buffer.from([index]).toString('base64'),
+  }))
+  const junk = [{ data: '' }, { data: null }, null, 'nope', { mimeType: 'image/png' }]
+  assert.equal(referencesFromBody({ references: [...many, ...junk] }).references.length, 16)
+  // A browser-reported type is not trusted: a non-image falls back to png.
+  assert.equal(referencesFromBody({ references: [{ data: 'AAAA', mimeType: 'text/html' }] }).references[0].mimeType, 'image/png')
+  assert.deepEqual(referencesFromBody({}).references, [])
+  assert.deepEqual(referencesFromBody({ references: 'nope' }).references, [])
+})
+
+test('a reference image switches the quote to image-to-image', async () => {
+  const modes = []
+  const quoted = []
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    resolveModelAndParams: async (options) => {
+      modes.push(options.mode)
+      return { model: 'image:a', params: { size: '1:1', resolution: '1K', quality: 'auto', count: 1 }, catalogPicked: false }
+    },
+    client: {
+      quote: async (input) => {
+        quoted.push(input)
+        return { quoteId: 'q', amount: 1, currency: 'USD', expiresAt: new Date(Date.now() + 60_000).toISOString() }
+      },
+    },
+  })
+  const data = Buffer.from([9, 8, 7]).toString('base64')
+  const response = await handlers.quote(postRequest({ prompt: 'a cat', references: [{ mimeType: 'image/png', data }] }))
+  assert.equal(response.status, 200)
+  assert.deepEqual(modes, ['image-to-image'])
+  assert.equal(quoted[0].params.mode, 'image-to-image')
+  assert.equal(quoted[0].params.referenceCount, 1)
+})
+
+test('without references the quote stays text-to-image', async () => {
+  const modes = []
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    resolveModelAndParams: async (options) => {
+      modes.push(options.mode)
+      return { model: 'image:a', params: { count: 1 }, catalogPicked: false }
+    },
+  })
+  await handlers.quote(postRequest({ prompt: 'a cat' }))
+  assert.deepEqual(modes, ['text-to-image'])
+})
+
+test('reference bytes reach the generation flow', async () => {
+  const seen = []
+  const modes = []
+  const { handlers } = makeHandlers({
+    key: 'jws_live_x',
+    resolveModelAndParams: async (options) => {
+      modes.push(options.mode)
+      return { model: 'image:a', params: { count: 1 }, catalogPicked: false }
+    },
+    runGeneration: async (options) => {
+      seen.push(options.args)
+      return { taskId: 't1', files: [], amount: 1, currency: 'USD' }
+    },
+  })
+  const data = Buffer.from([1, 2, 3]).toString('base64')
+  const response = await handlers.generate(postRequest({ prompt: 'a cat', references: [{ mimeType: 'image/png', data }] }))
+  assert.equal(response.status, 200)
+  assert.deepEqual(modes, ['image-to-image'])
+  assert.equal(seen[0].references.length, 1)
+  assert.deepEqual([...seen[0].referenceFiles[0].bytes], [1, 2, 3])
+  assert.equal(seen[0].referenceFiles[0].mimeType, 'image/png')
+})
+
+// #endregion
 
 test('task needs an id and proxies the poll', async () => {
   const { handlers } = makeHandlers({ key: 'jws_live_x' })

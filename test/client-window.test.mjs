@@ -174,6 +174,18 @@ const MODEL = {
   ],
 }
 
+/** A model whose SKUs carry catalog prices, for the estimate line. */
+const PRICED = {
+  id: 'image:priced',
+  name: 'Priced',
+  modes: ['text-to-image'],
+  capabilities: { maxOutputImages: 4 },
+  skus: [
+    { mode: 'text-to-image', size: '1:1', resolution: '1K', quality: 'auto', price: 0.05, currency: 'USD' },
+    { mode: 'text-to-image', size: '16:9', resolution: '2K', quality: 'high', price: 0.11, currency: 'USD' },
+  ],
+}
+
 // #region pure helpers
 
 test('skusForMode keeps only the requested mode', async () => {
@@ -685,6 +697,144 @@ test('a host failure is rendered instead of thrown', async () => {
       assert.match(byClass(tree, 'jws-error').children[0], /熔断/u)
     },
   )
+})
+
+// #endregion
+
+// #region estimate, references, cancel
+
+test('estimateForSelection prices exactly the chosen SKU', async () => {
+  const { exports } = await loadExports()
+  const skus = PRICED.skus
+  assert.deepEqual(
+    exports.estimateForSelection(skus, { size: '16:9', resolution: '2K', quality: 'high', count: 2 }),
+    { price: 0.11, currency: 'USD', count: 2 },
+  )
+  // A combination the catalog does not sell gets no estimate rather than a guess.
+  assert.equal(exports.estimateForSelection(skus, { size: '1:1', resolution: '2K', quality: 'high', count: 1 }), null)
+  assert.equal(exports.estimateForSelection([], { count: 1 }), null)
+  // A SKU with no price is not a price.
+  assert.equal(exports.estimateForSelection([{ size: '1:1' }], { size: '1:1', count: 1 }), null)
+})
+
+test('the form shows a catalog estimate before any quote is requested', async () => {
+  const { exports, harness } = await loadExports()
+  await withFetch({}, async () => {
+    const tree = walk(harness.render(exports.GenerateForm, {
+      models: [PRICED],
+      maxAmount: 20,
+      budgetCurrency: 'CNY',
+    }))
+    const line = byClass(tree, 'jws-estimate')
+    assert.ok(line, 'the form must show an estimate when the catalog prices the SKU')
+    assert.match(String(line.children[0]), /0\.05 USD/u)
+    // It must not read as a commitment: the quote is what gates the budget.
+    assert.match(String(line.children[0]), /以报价为准/u)
+  })
+})
+
+test('the form shows no estimate when the catalog carries no price', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.GenerateForm, {
+    models: [MODEL],
+    maxAmount: 20,
+    budgetCurrency: 'CNY',
+  }))
+  assert.equal(byClass(tree, 'jws-estimate'), undefined)
+})
+
+test('the reference picker offers a drop zone and a file input', async () => {
+  const { exports, harness } = await loadExports()
+  const tree = walk(harness.render(exports.ReferencePicker, {
+    references: [],
+    disabled: false,
+    onAdd: () => {},
+    onRemove: () => {},
+  }))
+  const input = tree.find((node) => node.type === 'input' && node.props.type === 'file')
+  assert.ok(input, 'there must be a file input')
+  assert.equal(input.props.accept, 'image/*')
+  assert.equal(input.props.multiple, true)
+  assert.ok(byClass(tree, 'jws-drop'), 'there must be a drop target')
+  assert.match(String(byClass(tree, 'jws-hint').children[0]), /拖一张图/u)
+})
+
+test('existing references render thumbnails and can be removed', async () => {
+  const { exports, harness } = await loadExports()
+  const removed = []
+  const references = [
+    { name: 'a.png', mimeType: 'image/png', data: 'AA' },
+    { name: 'b.jpg', mimeType: 'image/jpeg', data: 'BB' },
+  ]
+  const tree = walk(harness.render(exports.ReferencePicker, {
+    references,
+    disabled: false,
+    onAdd: () => {},
+    onRemove: (index) => removed.push(index),
+  }))
+  const thumbs = tree.filter((node) => node.props?.className === 'jws-thumb')
+  assert.equal(thumbs.length, 2)
+  assert.equal(thumbs[0].props.src, 'data:image/png;base64,AA')
+  assert.equal(thumbs[0].props.alt, 'a.png')
+  const removeButtons = tree.filter((node) => node.type === 'button' && node.children[0] === '移除')
+  assert.equal(removeButtons.length, 2)
+  removeButtons[1].props.onClick()
+  assert.deepEqual(removed, [1])
+})
+
+test('a drop is forwarded to the same handler as the picker', async () => {
+  const { exports, harness } = await loadExports()
+  const added = []
+  const tree = walk(harness.render(exports.ReferencePicker, {
+    references: [],
+    disabled: false,
+    onAdd: (files) => added.push(files),
+    onRemove: () => {},
+  }))
+  const zone = byClass(tree, 'jws-drop')
+  let prevented = 0
+  zone.props.onDrop({
+    preventDefault: () => { prevented += 1 },
+    dataTransfer: { files: ['a', 'b'] },
+  })
+  assert.equal(prevented, 1, 'the drop must not navigate the page')
+  assert.deepEqual(added, [['a', 'b']])
+})
+
+test('a running generation can be cancelled, and says the task may still be billed', async () => {
+  const { exports, harness } = await loadExports()
+  const props = { models: [MODEL], maxAmount: 20, budgetCurrency: 'CNY' }
+  const original = globalThis.fetch
+  globalThis.fetch = (url, init) => new Promise((resolve, reject) => {
+    if (String(url).endsWith('/generate')) {
+      init.signal?.addEventListener('abort', () => {
+        const error = new Error('aborted')
+        error.name = 'AbortError'
+        reject(error)
+      })
+      return
+    }
+    resolve({ ok: true, status: 200, json: async () => ({ ok: true }) })
+  })
+  try {
+    let tree = walk(harness.render(exports.GenerateForm, props))
+    tree.find((node) => node.type === 'textarea').props.onChange({ target: { value: 'a cat' } })
+    tree = walk(harness.render(exports.GenerateForm, props))
+    const pending = tree.find((node) => node.type === 'button' && node.props['data-primary'] === 'true').props.onClick()
+
+    tree = walk(harness.render(exports.GenerateForm, props))
+    const cancel = tree.find((node) => node.type === 'button' && node.children[0] === '取消等待')
+    assert.ok(cancel, 'a cancel control must appear while generating')
+    cancel.props.onClick()
+    await pending
+
+    tree = walk(harness.render(exports.GenerateForm, props))
+    // Cancelling stops the wait; the submitted task still completes and bills,
+    // so the message must not imply the money was saved.
+    assert.match(String(byClass(tree, 'jws-error').children[0]), /可能仍在服务端进行并计费/u)
+  } finally {
+    globalThis.fetch = original
+  }
 })
 
 // #endregion
