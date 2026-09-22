@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-jws-image",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "JWS image generation for DeepSeek Harness: a jws_generate_image tool plus a sidebar/composer-dock generation window, over the native image.aijws.com API.",
   "license": "MIT",
   "type": "module",
