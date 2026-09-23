@@ -11,15 +11,17 @@ DSH 的 JWS 生图插件：agent 工具 `jws_generate_image` + **右侧栏里的
 - 密钥：`JWS_API_KEY` 环境变量，或 `~/.config/jws-image/config.json`（**与 `jws-api-demo` skill 共用同一份**）
 - 密钥**只在宿主进程**；浏览器不接触、不存储、不记录
 
-**版本 0.2.2**（2026-09-22）。窗口具备：目录驱动的表单、catalog 价格预估、报价与预算披露、
+**版本 0.2.3**（2026-09-22）。在 0.2.2 的界面能力之外，会话中的 `jws_generate_image` 成功生成现在也会写入右侧栏共用的历史记录，并持久化到 `history.json`；启动时先恢复已有历史，避免快速生成覆盖旧记录。此行为有回归测试覆盖。宿主端修复尚未在本次发布中做真实浏览器验收；安装后需重启网关才会在运行中的实例生效。
+
+窗口具备：目录驱动的表单、catalog 价格预估、报价与预算披露、
 **逐次预算（只能收紧）**、参考图（图生图，**按每个模型自己的上限**）、**自定义尺寸（含实时校验）**、
 生成预览与 lightbox、**历史（缩略图 + 回填参数 + 删单条 + 清空 + 可选连磁盘文件一起删）**、取消等待、
 **送进当前对话**、**模型信息提示**、**双语 zh/en**、**首次使用引导**、API 契约状态条、
-常驻「更换密钥」。上面这些每一项都有对应的单元测试；`node --test` 全绿（0.2.2 实测）。
+常驻「更换密钥」。界面截图仍来自 0.2.2；本次没有 UI 改动。完整测试结果以本次发布验证为准。
 
 ## 界面截图
 
-0.2.2 实机截图。窗口开在**右侧栏**，所以每张都只是那一栏，不是整页
+0.2.2 实机截图（0.2.3 未重新拍摄）。窗口开在**右侧栏**，所以每张都只是那一栏，不是整页
 （视口 1600×1000，2 倍图；用 playwright-core 驱动本机 Chrome 拍的，截图脚本未入库）。
 
 **历史里那两条是真实数据**：都是在窗口里手打提示词、真的点了「生成」出来的
@@ -101,7 +103,7 @@ dock 入口**先试右侧栏，失败才回落弹窗**，两种构建都能用�
 
 | 入口 | 走什么 |
 |---|---|
-| agent 工具 `jws_generate_image` | 宿主直接调 API |
+| agent 工具 `jws_generate_image` | 宿主直接调 API；成功生成后写入与侧栏共用的历史并落盘 |
 | 输入框下方 dock 入口 → **右侧栏生图 tab** | 浏览器调 `/api/jws-image/*`，宿主代调 API |
 
 界面**首次打开**若没有密钥，直接显示密钥设置页（粘贴 → 宿主先校验再写盘 0600），
@@ -121,7 +123,7 @@ dock 入口**先试右侧栏，失败才回落弹窗**，两种构建都能用�
 | `POST /quote` | 代理报价；接受逐次预算，回带**实际生效的**上限与 `referenceLimit` |
 | `POST /generate` | 生成并把图片以 base64 回给窗口预览 |
 | `GET  /task?id=` | 轮询任务 |
-| `GET  /history` | 出图历史（**落盘**到 `<credentialsDir>/history.json`，重启不清空，上限 20 条） |
+| `GET  /history` | 出图历史（**落盘**到 `<credentialsDir>/history.json`，重启不清空，上限 20 条；侧栏和会话工具共享） |
 | `POST /history-delete` | 删单条（`taskId`）或清空（`all: true`）；默认**只删记录**，带 `deleteFiles: true` 时连磁盘文件一起删 |
 | `GET  /history-image?taskId=&index=` | 按任务 id + 序号提供图片字节（路径不取自调用方，杜绝路径穿越） |
 | `GET  /api-status` | 契约新鲜度 |
@@ -213,7 +215,7 @@ dock 入口**先试右侧栏，失败才回落弹窗**，两种构建都能用�
 ```powershell
 node --test                        # 跑测试（不要写 `node --test test/`，本机 Node 会把目录参数当模块路径）
 npm pack                           # 打包
-dsh plugin --profile web add .\dsh-plugin-jws-image-0.2.2.tgz
+dsh plugin --profile web add .\dsh-plugin-jws-image-0.2.3.tgz
 # 首次安装必须重启网关（bundle 列表在启动时读取）
 powershell -NoProfile -File "C:\Users\Administrator\.dsh\restart-web-gateway.ps1"
 ```

@@ -185,6 +185,9 @@ test('a missing attachments service degrades to paths only', async () => {
   const env = pinCredentialEnv(home)
   try {
     process.env.JWS_API_KEY = 'jws_live_test'
+    const configDir = join(home, '.config', 'jws-image')
+    const previousEntry = { taskId: 'previous-task', files: ['/tmp/previous.png'] }
+    await writeHistory(join(configDir, 'history.json'), [previousEntry])
     const definition = registerTool({ get: () => undefined })
 
     const value = await withStubbedFetch(async () => definition.execute({ prompt: 'a cat' }, {}))
@@ -209,6 +212,27 @@ test('a missing attachments service degrades to paths only', async () => {
     // The image really landed on disk, through the `.tmp` + rename path.
     const written = await readFile(value.images[0].path)
     assert.equal(written.length, 8)
+
+    // Session-tool generations are part of the same list as sidebar generations,
+    // and restoring history before the call must preserve earlier entries.
+    const historyFile = join(configDir, 'history.json')
+    const entries = await readHistory(historyFile)
+    assert.equal(entries.length, 2)
+    assert.deepEqual(entries[0], {
+      taskId: 'task-42',
+      model: 'image:catalog-pick',
+      params: { size: '3:4', resolution: '2K', quality: 'high', count: 1 },
+      prompt: 'a cat',
+      referenceCount: 0,
+      files: value.files,
+      amount: 2,
+      currency: 'CNY',
+      maxAmount: 20,
+      at: entries[0].at,
+      status: 'done',
+    })
+    assert.equal(Number.isFinite(entries[0].at), true)
+    assert.deepEqual(entries[1], previousEntry)
   } finally {
     env.restore()
     await rm(home, { recursive: true, force: true })
